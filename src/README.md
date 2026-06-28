@@ -7,6 +7,11 @@ turnkey "drop-in and forget" audio stack. Board-specific, failsafe, and CMSIS-SA
 buffer-semantics concerns stay in layers above it, so a project can extend only what it
 needs.
 
+> Want to run it on hardware first?
+> Start with [dspic33ak-hal-starter](https://github.com/sulaolab/dspic33ak-hal-starter),
+> which vendors validated snapshots of the dsPIC33AK HAL repositories and provides a
+> ready-to-build MPLAB X project for the dsPIC33AK Curiosity board.
+
 ## 1. What this HAL does
 
 - dsPIC33AK SPI framed mode (AUDEN=0, FRMEN=1) used as an I2S/TDM transport.
@@ -44,9 +49,9 @@ needs.
 ## 4. Required sibling HALs
 
 - `dspic33ak_dma` — DMA channel setup/arming (required).
-- `dspic33ak_high_res_timer` — used by the load monitor **when initialized**; if the timer
-  is not initialized, `get_load()` returns `valid=false` (no hard dependency, no device
-  gating).
+- `dspic33ak_high_res_timer` — compile/link sibling dependency for the load monitor.
+  Runtime use is gated by `dspic33ak_high_res_timer_is_initialized()`; if the timer is
+  not initialized, `get_load()` returns `valid=false`.
 - The SPI register-mask helper (`dspic33ak_spi_i2s_tdm_reg.h`) ships inside this HAL folder.
 
 ## 5. Supported devices

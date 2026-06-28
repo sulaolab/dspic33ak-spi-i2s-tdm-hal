@@ -289,9 +289,9 @@ TDM_COMPILEASSERT( TDM_ARRAY_SIZE(s_spi_legs) <= (size_t)TDM_SPI_INST_COUNT );
 
 // Per-instance geometry sanity (compile-time), one set per instance-list row: slots/blk
 // fit their leg fields (uint8_t / uint16_t), the 2*slots*blk word count cannot overflow
-// int32 indexing, and the generated buffer is exactly that size. The Perseus rows use the
-// stream-wide macros (already range-checked in conf.h); these guard a standalone carve-out
-// that gives a row its own slots/blk -- so the per-instance-geometry promise has teeth.
+// int32 indexing, and the generated buffer is exactly that size. The default rows may use
+// stream-wide macros already range-checked in conf.h; these asserts also cover configs
+// that give each row its own slots/blk, so the per-instance geometry promise has teeth.
 #define X(name, phys, rx, tx, role, slots, blk)                                          \
     TDM_COMPILEASSERT( (slots) > 0 && (slots) <= 255 );                                   \
     TDM_COMPILEASSERT( (blk)   > 0 && (blk)   <= 65535 );                                 \

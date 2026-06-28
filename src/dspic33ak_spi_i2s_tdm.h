@@ -21,35 +21,27 @@
 #endif
 
 //===========================================================
-// dspic33ak_spi_i2s_tdm.{c,h} + dspic33ak_spi_i2s_tdm_reg.h = the CANDIDATE public
-// HAL core (a Perseus-derived reusable SPI/I2S/TDM transport core, pending a
-// standalone carve-out -- NOT yet a fully generic published HAL; see the deferred
-// deps below). It does: SPI framed-mode (I2S/TDM) setup, DMA + ping-pong buffers,
-// block callback, start/stop/configure/get_status, and deadline-miss + load
-// diagnostics. It is RATE-AGNOSTIC (no sample-rate state/API -- runs at the configured
-// BRG / external clock). It does NOT do DSP, codec (WM8904), PPS/CLC pins, or app config
-// -- a client registers a block callback and a board/clock port.
-//   - audio_app_board.* (audio_app/) = Perseus board-adapter EXAMPLE (not core).
-//   - audio_app.* (audio_app/)                  = Perseus demo app layer (not core).
-// Pin/CLC + external-clock concerns are reached through the registered port
-// (set_port()) -- the core no longer includes the board adapter, nor app config.
-// Compile-time stream geometry + topology come from a project-supplied
-// dspic33ak_spi_i2s_tdm_conf.h. The HAL core only depends on DSPIC33AK_TDM_* macros
-// from that header -- it does not read app symbols directly. The publishable example
-// config (conf.h_example in the HAL folder) is self-contained and app-independent.
-// The in-tree project config (src/dspic33ak_spi_i2s_tdm_conf.h) may derive
-// DSPIC33AK_TDM_* from APP_* for automatic consistency; that is the project's
-// integration choice, not the HAL's requirement. Instance count,
-// physical-SPI/DMA assignment, and per-instance geometry are driven from the
-// DSPIC33AK_TDM_INSTANCE_LIST in conf.h (leg enum / buffers / leg table / DMA vectors all
-// generated from it). Supported-device limitation (see docs/sai_public_hal_readiness.md):
-// the silicon-facts paths cover __dsPIC33AK512MPS512__ / __dsPIC33AK128MC106__ only (the
-// core #error's otherwise; other parts need their facts added). Known sibling-HAL
-// dependencies: dspic33ak_dma (required), and the load monitor's use of the hal_timer
-// high-res public API (dspic33ak_high_res_timer_*, runtime-gated via is_initialized()) --
-// a clean sibling-HAL dependency, like hal_dma. The debug-only deps (<stdio.h>,
-// dspic33ak_tick_timer.h for timestamps, board_dbg_pins.h scope pins) are included only
-// under ENA_TDM_DBG, so the default (debug-off) core pulls none of them.
+// dspic33ak_spi_i2s_tdm.{c,h} + dspic33ak_spi_i2s_tdm_reg.h provide a reusable
+// dsPIC33AK SPI framed-mode I2S/TDM transport HAL. It owns SPI framed-mode setup,
+// RX/TX DMA ping-pong buffers, per-instance block callbacks, lifecycle, status,
+// deadline-miss, and load diagnostics.
+//
+// It does not own DSP, codec setup, PPS/CLC routing, sample-rate policy, app
+// config, or CMSIS-SAI buffer semantics. Board pin/CLC and external-clock concerns
+// are reached only through the registered board/clock port hook (set_port()).
+//
+// Compile-time stream geometry and topology come from a project-supplied
+// dspic33ak_spi_i2s_tdm_conf.h. The HAL core only depends on DSPIC33AK_TDM_*
+// macros from that header -- it does not read app symbols directly. Instance
+// count, physical-SPI/DMA assignment, and per-instance geometry are driven from
+// DSPIC33AK_TDM_INSTANCE_LIST in conf.h (leg enum, buffers, leg table, and DMA
+// vectors are generated from it).
+//
+// Supported-device limitation: the silicon-facts paths currently cover
+// __dsPIC33AK512MPS512__ and __dsPIC33AK128MC106__ only; other parts need their
+// facts added in dspic33ak_spi_i2s_tdm_hw.{c,h}. Sibling dependencies are
+// dspic33ak_dma (required) and dspic33ak_high_res_timer (compile/link dependency
+// for the load monitor, runtime-gated via is_initialized()).
 //===========================================================
 
 //===========================================================

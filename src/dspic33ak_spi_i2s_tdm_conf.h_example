@@ -1,0 +1,147 @@
+#ifndef DSPIC33AK_SPI_I2S_TDM_CONF_H
+#define DSPIC33AK_SPI_I2S_TDM_CONF_H
+
+//===========================================================
+// dspic33ak_spi_i2s_tdm_conf.h_example  --  TEMPLATE (not compiled as-is)
+//
+// This is the publishable EXAMPLE for the SPI/I2S/TDM HAL's compile-time config. The
+// HAL ships only this template; the PROJECT supplies the real header (bring-your-own-
+// config, like CMSIS RTE_Device.h / FreeRTOSConfig.h / lwipopts.h). To use the HAL:
+//
+//   1. Copy this file to your project, renamed dspic33ak_spi_i2s_tdm_conf.h.
+//   2. Put it on the compiler include path (the HAL core does
+//      #include "dspic33ak_spi_i2s_tdm_conf.h"). Keep it OUT of this folder so it
+//      shadows nothing -- e.g. in your project's src/.
+//   3. Edit the values below for your board.
+//
+// The `.h_example` extension means this template is never picked up by that include.
+//
+// This is the SOLE, self-contained HAL config entry: the core translation units include
+// ONLY this header for config and it has NO app-layer dependency (it never includes
+// app_specific_config_*). Everything the HAL needs lives here as plain literals -- so
+// hal_spi_i2s_tdm/ stands alone (given a supplied conf.h) and is publishable as-is.
+//
+// Dependency direction: app code MAY read these macros (app -> HAL); the HAL MUST NOT
+// read app config (HAL -> app is forbidden). If your project also derives these values
+// in its own config, keep the two as independent owners and assert their CONSISTENCY on
+// the APP side (compare your APP_* against the DSPIC33AK_TDM_* here and #error on a
+// mismatch). The HAL does not police the app, and vice versa.
+//
+// Each setting is -D-overridable (#ifndef-guarded). This template defaults to the
+// SAFEST generic config: a single SPI1 TDM8 stream, no second codec. Override with -D
+// or by editing below for I2S (2 slots), a different block size, a second SPI, etc.
+//
+// Compile-time integration settings:
+//   DSPIC33AK_TDM_SLOTS_PER_FS   slots per frame-sync: TDM8 = 8, I2S = 2.
+//   DSPIC33AK_TDM_BLOCK_FRAMES   frames per ping/pong half (DMA block size).
+//   DSPIC33AK_TDM_USE_SPI2      1 = SPI2 Audio transport is part of this build.
+// (Sample rate is NOT a setting here -- the transport is rate-agnostic; the product's
+// supported-rate policy lives in the app layer, not the HAL.)
+// The core's static DMA ping-pong buffers are sized 2 * SLOTS_PER_FS *
+// BLOCK_FRAMES, and configure() rejects a config_t whose slots_per_fs /
+// block_frames do not match these compile-time values.
+//===========================================================
+
+// --- HAL geometry / topology (literals; -D wins) ---
+#ifndef DSPIC33AK_TDM_SLOTS_PER_FS
+#define DSPIC33AK_TDM_SLOTS_PER_FS    8     // TDM8 (I2S = 2)
+#endif
+#ifndef DSPIC33AK_TDM_BLOCK_FRAMES
+#define DSPIC33AK_TDM_BLOCK_FRAMES    32    // frames per ping/pong half
+#endif
+#ifndef DSPIC33AK_TDM_USE_SPI2
+#define DSPIC33AK_TDM_USE_SPI2        0     // single SPI Audio transport by default
+#endif
+#ifndef DSPIC33AK_TDM_USE_SECOND_SPI
+// Compatibility alias only. DSPIC33AK_TDM_USE_SPI2 is the canonical topology
+// macro for new HAL core and integration code.
+#define DSPIC33AK_TDM_USE_SECOND_SPI  DSPIC33AK_TDM_USE_SPI2
+#elif DSPIC33AK_TDM_USE_SECOND_SPI != DSPIC33AK_TDM_USE_SPI2
+#error "DSPIC33AK_TDM_USE_SECOND_SPI conflicts with canonical DSPIC33AK_TDM_USE_SPI2."
+#endif
+
+//===========================================================
+// DMA channel allocation (single source of truth for the SPI<->DMA binding)
+//
+// Each SPI Audio instance owns one RX + one TX DMA channel. These numbers are read by
+// the HAL core both for its s_spi_legs[] table AND for its generated _DMAnInterrupt
+// vectors (the core builds the vector names from them by token-paste), so changing an
+// assignment here moves the whole chain -- leg table and vector -- together. Each is
+// -D overridable. Maintain a chip-wide map by hand: the HAL cannot see other
+// subsystems' DMA usage. Duplicate channels fail the build (redefined vector).
+//===========================================================
+#ifndef DSPIC33AK_TDM_SPI1_RX_DMA
+#define DSPIC33AK_TDM_SPI1_RX_DMA   0
+#endif
+#ifndef DSPIC33AK_TDM_SPI1_TX_DMA
+#define DSPIC33AK_TDM_SPI1_TX_DMA   1
+#endif
+#ifndef DSPIC33AK_TDM_SPI2_RX_DMA
+#define DSPIC33AK_TDM_SPI2_RX_DMA   2
+#endif
+#ifndef DSPIC33AK_TDM_SPI2_TX_DMA
+#define DSPIC33AK_TDM_SPI2_TX_DMA   3
+#endif
+
+
+//===========================================================
+// DMA interrupt-vector ownership.
+//   1 (default) : TURNKEY -- the HAL DEFINES the _DMA<rx>Interrupt vectors itself.
+//   0           : the HAL defines NO vectors. The integrator owns the IVT and calls
+//                 dspic33ak_spi_i2s_tdm_inst_rx_isr(spiN()) from their own
+//                 _DMA<rx>Interrupt for each instance's RX channel.
+//===========================================================
+#ifndef DSPIC33AK_TDM_DEFINE_DMA_VECTORS
+#define DSPIC33AK_TDM_DEFINE_DMA_VECTORS   1
+#endif
+
+
+//===========================================================
+// Instance descriptor list -- SINGLE SOURCE for instance count + assignment.
+//
+//   X( leg-name, phys-SPI, RX-DMA, TX-DMA, role, slots, blk )
+// The FIRST row is the block-timing REFERENCE (BLOCK_REF -- its RX-block ISR defines the
+// block boundary and is what is_running()/the singleton get_status() report); the rest
+// are FOLLOWERs. BLOCK_REF is NOT a clock master; the clock role (master/slave) is
+// separate and per-instance (config_t.role).
+// slots/blk are PER INSTANCE (each leg's Rx_<name>/Tx_<name> is sized 2*slots*blk), so
+// different legs may run different framing/block sizes. The core generates the leg enum,
+// per-instance buffers, the s_spi_legs[] table, and the per-instance _DMAnInterrupt
+// vectors from this list -- adding an instance = add a row (a free SPI + two free DMA
+// channels).
+//===========================================================
+#if DSPIC33AK_TDM_USE_SPI2
+#define DSPIC33AK_TDM_INSTANCE_LIST(X)                                                                                              \
+    X( SPI1, TDM_SPI1, DSPIC33AK_TDM_SPI1_RX_DMA, DSPIC33AK_TDM_SPI1_TX_DMA, BLOCK_REF, DSPIC33AK_TDM_SLOTS_PER_FS, DSPIC33AK_TDM_BLOCK_FRAMES ) \
+    X( SPI2, TDM_SPI2, DSPIC33AK_TDM_SPI2_RX_DMA, DSPIC33AK_TDM_SPI2_TX_DMA, FOLLOWER, DSPIC33AK_TDM_SLOTS_PER_FS, DSPIC33AK_TDM_BLOCK_FRAMES )
+#else
+#define DSPIC33AK_TDM_INSTANCE_LIST(X)                                                                                              \
+    X( SPI1, TDM_SPI1, DSPIC33AK_TDM_SPI1_RX_DMA, DSPIC33AK_TDM_SPI1_TX_DMA, BLOCK_REF, DSPIC33AK_TDM_SLOTS_PER_FS, DSPIC33AK_TDM_BLOCK_FRAMES )
+#endif // DSPIC33AK_TDM_USE_SPI2
+
+
+#if (DSPIC33AK_TDM_SLOTS_PER_FS <= 0)
+#error "DSPIC33AK_TDM_SLOTS_PER_FS must be positive."
+#endif
+
+#if (DSPIC33AK_TDM_SLOTS_PER_FS > 255)
+#error "DSPIC33AK_TDM_SLOTS_PER_FS must fit in uint8_t."
+#endif
+
+#if (DSPIC33AK_TDM_BLOCK_FRAMES <= 0)
+#error "DSPIC33AK_TDM_BLOCK_FRAMES must be positive."
+#endif
+
+#if (DSPIC33AK_TDM_BLOCK_FRAMES > 65535)
+#error "DSPIC33AK_TDM_BLOCK_FRAMES must fit in uint16_t."
+#endif
+
+#if ((DSPIC33AK_TDM_USE_SPI2 != 0) && (DSPIC33AK_TDM_USE_SPI2 != 1))
+#error "DSPIC33AK_TDM_USE_SPI2 must be 0 or 1."
+#endif
+
+#if (DSPIC33AK_TDM_SLOTS_PER_FS > (2147483647 / (2 * DSPIC33AK_TDM_BLOCK_FRAMES)))
+#error "SPI/I2S/TDM DMA buffer geometry overflows the static buffer element count."
+#endif
+
+#endif // DSPIC33AK_SPI_I2S_TDM_CONF_H

@@ -78,9 +78,6 @@ typedef struct
     uint32_t max_us10;
 } dspic33ak_spi_i2s_tdm_load_t;
 
-// Compatibility alias for the pre-publish name. Deprecated -- use
-// dspic33ak_spi_i2s_tdm_load_t in new code.
-typedef dspic33ak_spi_i2s_tdm_load_t TDM_DMA0_ISR_TIME_MONITOR_t;
 
 
 //===========================================================

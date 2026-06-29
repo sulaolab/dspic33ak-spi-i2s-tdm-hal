@@ -1,0 +1,27 @@
+# Default: normalize text files to CRLF for Windows/MPLAB X workflow.
+* text=auto eol=crlf
+
+# Source/docs (explicit)
+*.c    text eol=crlf
+*.h    text eol=crlf
+*.md   text eol=crlf
+*.ps1  text eol=crlf
+*.py   text eol=crlf
+*.xml  text eol=crlf
+*.gld  text eol=crlf
+*.mk   text eol=crlf
+LICENSE       text eol=crlf
+.gitignore    text eol=crlf
+.gitattributes text eol=crlf
+
+# Binary assets/outputs (no EOL conversion)
+*.png  binary
+*.jpg  binary
+*.svg  binary
+*.hex  binary
+*.elf  binary
+*.o    binary
+*.a    binary
+*.X.a  binary
+*.bin  binary
+*.exe  binary

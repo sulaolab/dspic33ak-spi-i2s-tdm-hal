@@ -52,13 +52,6 @@
 #ifndef DSPIC33AK_TDM_USE_SPI2
 #define DSPIC33AK_TDM_USE_SPI2        0     // single SPI Audio transport by default
 #endif
-#ifndef DSPIC33AK_TDM_USE_SECOND_SPI
-// Compatibility alias only. DSPIC33AK_TDM_USE_SPI2 is the canonical topology
-// macro for new HAL core and integration code.
-#define DSPIC33AK_TDM_USE_SECOND_SPI  DSPIC33AK_TDM_USE_SPI2
-#elif DSPIC33AK_TDM_USE_SECOND_SPI != DSPIC33AK_TDM_USE_SPI2
-#error "DSPIC33AK_TDM_USE_SECOND_SPI conflicts with canonical DSPIC33AK_TDM_USE_SPI2."
-#endif
 
 //===========================================================
 // DMA channel allocation (single source of truth for the SPI<->DMA binding)

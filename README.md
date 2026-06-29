@@ -58,10 +58,13 @@ a complete worked example.
 
 ## 4. Required sibling HALs
 
-- `dspic33ak_dma` — DMA channel setup/arming (required).
+- `dspic33ak_dma` — DMA channel setup/arming (required). Standalone repo:
+  [dspic33ak-dma-hal](https://github.com/sulaolab/dspic33ak-dma-hal).
 - `dspic33ak_high_res_timer` — compile/link sibling dependency for the load monitor.
   Runtime use is gated by `dspic33ak_high_res_timer_is_initialized()`; if the timer is
-  not initialized, `get_load()` returns `valid=false`.
+  not initialized, `get_load()` returns `valid=false`. Standalone repo:
+  [dspic33ak-timer-hal](https://github.com/sulaolab/dspic33ak-timer-hal) (the
+  Timer2 high-resolution counter).
 - The SPI register-mask helper (`dspic33ak_spi_i2s_tdm_reg.h`) ships inside this HAL folder.
 
 ## 5. Supported devices

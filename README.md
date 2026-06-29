@@ -12,6 +12,16 @@ needs.
 > which vendors validated snapshots of the dsPIC33AK HAL repositories and provides a
 > ready-to-build MPLAB X project for the dsPIC33AK Curiosity board.
 
+<img src="docs/images/tdm8-scope-mikrobus-a.png" alt="Oscilloscope capture of MikroBUS-A SPI pins during a TDM8 smoke demo: BCLK (~12.5 MHz, yellow), FS (~49 kHz, blue), and DataOut carrying the TDM8 slot data (red)" width="900">
+
+Oscilloscope capture from the dspic33ak-hal-starter TDM8 smoke demo running on
+a dsPIC33AK Curiosity board (MikroBUS-A pins, no codec). BCLK ~12.5 MHz
+(yellow), frame sync FS ~49 kHz (blue), DataOut with 8 × 32-bit slots (red).
+This HAL drives the signal; board pin routing and DMA configuration are supplied
+by the integrating project — see
+[dspic33ak-hal-starter](https://github.com/sulaolab/dspic33ak-hal-starter) for
+a complete worked example.
+
 ## 1. What this HAL does
 
 - dsPIC33AK SPI framed mode (AUDEN=0, FRMEN=1) used as an I2S/TDM transport.

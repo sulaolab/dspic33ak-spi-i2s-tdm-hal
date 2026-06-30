@@ -12,13 +12,14 @@ needs.
 > which vendors validated snapshots of the dsPIC33AK HAL repositories and provides a
 > ready-to-build MPLAB X project for the dsPIC33AK Curiosity board.
 
-<img src="docs/images/tdm8-scope-mikrobus-a.png" alt="Oscilloscope capture of MikroBUS-A SPI pins during a TDM8 smoke demo: BCLK (~12.5 MHz, yellow), FS (~49 kHz, blue), and DataOut carrying the TDM8 slot data (red)" width="900">
+<img src="docs/images/tdm8-scope-mikrobus-a.png" alt="Oscilloscope capture of MikroBUS-A SPI pins during a TDM8 master smoke demo: BCLK (~12.5 MHz, yellow), a ~50%-duty frame sync FS (~49 kHz, blue, CLC10-generated), and DataOut carrying the TDM8 slot data (red); BCLK/FS = 256" width="900">
 
-Oscilloscope capture from the dspic33ak-hal-starter TDM8 smoke demo running on
-a dsPIC33AK Curiosity board (MikroBUS-A pins, no codec). BCLK ~12.5 MHz
-(yellow), frame sync FS ~49 kHz (blue), DataOut with 8 × 32-bit slots (red).
-This HAL drives the signal; board pin routing and DMA configuration are supplied
-by the integrating project — see
+Oscilloscope capture from the dspic33ak-hal-starter TDM8 **master** smoke demo
+running on a dsPIC33AK Curiosity board (MikroBUS-A pins, no codec). BCLK
+~12.5 MHz (yellow); frame sync FS ~49 kHz (blue) — here the **50%-duty** LRCLK-style
+FS produced by the HAL's `fs_shape = FS_50PCT` option (CLC10-generated, BCLK/FS = 256);
+DataOut with 8 × 32-bit slots (red). This HAL drives the signal; board pin routing
+and DMA configuration are supplied by the integrating project — see
 [dspic33ak-hal-starter](https://github.com/sulaolab/dspic33ak-hal-starter) for
 a complete worked example.
 
@@ -27,6 +28,14 @@ a complete worked example.
 - dsPIC33AK SPI framed mode (AUDEN=0, FRMEN=1) used as an I2S/TDM transport.
 - RX/TX ping-pong DMA, double-buffered.
 - One per-instance block callback per physical SPI: `cb(src, dst, user)`.
+- Selectable frame-sync waveform via `config.fs_shape` (the app states intent; the HAL
+  hides FRMSYPW/FRMCNT/CLC):
+  - `FS_PULSE` — short ~1-BCLK frame sync (DSP/TDM short sync).
+  - `FS_50PCT` — 50%-duty FS (I2S LRCLK style). I2S is native (FRMSYPW=1); a TDM **master**
+    gets a ~50%-duty FS synthesized by **CLC10** (a J-K flip-flop toggled by a half-frame
+    FRMSYNC marker, fed internally via virtual pin RPV8) on the same FS pin — no app/CLC code
+    and no extra pin (the FS pin is auto-detected by PPS reverse-lookup). A TDM slave receives
+    FS as an input, so it ignores `fs_shape`. See `dspic33ak_spi_i2s_tdm_fs_clc.{c,h}`.
 - `open` / `inst_configure` / `inst_start` / `inst_stop` / `close` lifecycle, plus
   `get_status` / `get_load` diagnostics (block count, deadline-miss, ISR load).
 - Optional board/clock **port** hook (`set_port()`) for pin/CLC routing and external-clock
@@ -37,7 +46,11 @@ a complete worked example.
 ## 2. What this HAL does NOT do
 
 - No codec init (e.g. WM8904) — that is board/app code.
-- No PPS/CLC pin routing in the core — reached only through the registered port hook.
+- No general board pin routing in the core — board FS/BCLK/DATA/MCLK routing is supplied by
+  the registered port hook. **Exception:** for `TDM master + FS_50PCT`, the HAL-owned CLC10
+  helper (`dspic33ak_spi_i2s_tdm_fs_clc.*`) does touch PPS/CLC — it temporarily repoints the
+  already-routed `SSx` FS pin to `CLC10OUT` (and routes `SSx`→RPV8) and restores it on
+  `release()`. This is the one place the core itself drives PPS/CLC.
 - No DSP — the callback owns any processing.
 - No sample-rate policy — the transport is rate-agnostic (runs at the configured BRG or
   the incoming external clock); the supported-rate set is an app concern.
@@ -74,6 +87,12 @@ Currently supported (silicon facts present):
 - `__dsPIC33AK512MPS512__`
 - `__dsPIC33AK128MC106__`
 
+> Note: the `FS_50PCT`-via-**CLC10** path (TDM master) is a feature of parts that have CLC10 +
+> virtual pin RPV8 — i.e. **AK512**. On **AK128** (no CLC10) it is unavailable: `engage()`
+> reports `NO_FS_PIN` and a TDM master can use `FS_PULSE`. `FS_PULSE` and I2S-native
+> `FS_50PCT` work on both parts. (The device itself is HAL-supported; only the CLC10 50%-FS
+> generator is AK512-only.)
+
 The HAL `#error`s on any other device. Adding a new dsPIC33AK part means adding its
 silicon facts in the HW layer (`dspic33ak_spi_i2s_tdm_hw.{c,h}`):
 
@@ -107,8 +126,10 @@ State honestly:
   - I2S 2-slot, or TDM 4/8/16/32 from the HAL envelope.
   - In practice the default test path is I2S / TDM8 depending on project config.
   - **Slave** (external BCLK/FS) is the main tested path.
-  - A **master** (self-clocked) path exists but should be treated as less tested unless
-    confirmed on the target board.
+  - A **master** (self-clocked) path exists; the TDM8 master with `FS_50PCT` (CLC10-generated
+    50%-duty FS) was bench-verified on a dsPIC33AK Curiosity board (BCLK/FS = 256, `miss=0`,
+    plus the single-codec starter demo and the Perseus dual-codec topology). Other
+    master rate/format combinations should still be confirmed on the target board.
 
 ## 8. CMSIS-SAI relationship
 

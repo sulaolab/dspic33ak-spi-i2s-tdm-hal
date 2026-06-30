@@ -106,15 +106,37 @@ typedef enum {
     DSPIC33AK_SPI_I2S_TDM_ROLE_MASTER = 1,
 } dspic33ak_spi_i2s_tdm_role_t;
 
+// External frame-sync (FS/LRCK) waveform shape. This is the user-facing INTENT; the HAL
+// picks the hardware mechanism, so the application never deals with FRMSYPW/FRMCNT/CLC:
+//   FS_PULSE   : short frame sync, one BCLK wide at the frame start (DSP/TDM "short sync").
+//                FRMSYPW=0, FRMCNT=slots_per_fs. No CLC.
+//   FS_50PCT   : 50%-duty FS, I2S LRCLK style.
+//                - I2S (2 slots): native -- FRMSYPW=1 (a one-word pulse IS 50% of a 2-word
+//                  frame). No CLC.
+//                - TDM (>=4 slots), MASTER: the SPI emits a 1-BCLK half-frame marker
+//                  (FRMSYPW=0, FRMCNT=slots_per_fs/2) that CLC10 toggles into a 50%-duty FS
+//                  on the same FS pin. The HAL owns CLC10 + virtual pin RPV8 (see
+//                  dspic33ak_spi_i2s_tdm_fs_clc.*).
+//                - TDM SLAVE: FS is an INPUT, so fs_shape is accepted but has no
+//                  generated-waveform effect (treated as normal slave framing). The CLC10
+//                  50%-duty FS is generated only in master mode.
+// NOTE: there is intentionally no "one-word-wide TDM" shape -- a word-wide TDM pulse is a
+// niche non-50% long-frame sync and was dropped in favor of these two common intents.
+typedef enum {
+    DSPIC33AK_SPI_I2S_TDM_FS_PULSE = 0,   // short frame sync, ~1 BCLK (FRMSYPW=0)
+    DSPIC33AK_SPI_I2S_TDM_FS_50PCT = 1,   // 50%-duty FS (I2S: native; TDM master: via CLC10)
+} dspic33ak_spi_i2s_tdm_fs_shape_t;
+
 typedef struct {
     dspic33ak_spi_i2s_tdm_format_t format;          // I2S vs TDM (FRMCNT/FRMPOL)
     dspic33ak_spi_i2s_tdm_role_t   role;            // master vs slave (MSTEN/FRMSYNC)
     uint8_t  slots_per_fs;                          // DSPIC33AK_TDM_SLOTS_PER_FS: I2S=2 / TDM8=8
     uint8_t  word_bits;                             // 32 (MODE32); only 32 validated
+    dspic33ak_spi_i2s_tdm_fs_shape_t fs_shape;      // FS waveform intent (see enum). HAL derives
+                                                    // FRMSYPW/FRMCNT and engages CLC10 as needed.
     uint16_t block_frames;                          // DSPIC33AK_TDM_BLOCK_FRAMES: frames per ping/pong half
     uint32_t brg;                                   // SPIxBRG (master only; ignored as slave)
     bool     mclk_enable;                           // MCLKEN (CLKGEN9 reference)
-    bool     fs_one_word_wide;                      // FRMSYPW
     bool     fs_coincides_first_bclk;               // SPIFE: 1=no delay, 0=1-bit delayed (ENA_1_BIT_DELAY)
     bool     bclk_idle_high;                        // CKP
     bool     bclk_change_on_active_to_idle;         // CKE

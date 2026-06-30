@@ -57,5 +57,12 @@ void dspic33ak_spi_i2s_tdm_hw_module_enable( tdm_spi_inst_t inst, bool enable );
 void dspic33ak_spi_i2s_tdm_hw_irq_clear_flags( tdm_spi_inst_t inst );
 void dspic33ak_spi_i2s_tdm_hw_soft_stop( tdm_spi_inst_t inst );
 
+// Return the PPS output-function code (_RPOUT_SSx) for one SPI instance's frame-sync
+// (SSx = FRMSYNC output in framed master mode). Used by the CLC10 50%-FS module to find,
+// by reverse PPS lookup, which physical pin the board routed this instance's FS to.
+// Returns false (and leaves *code untouched) if inst is out of range or the device header
+// defines no SSx output for it. (data-sheet fact, device-#ifdef'd like the rest of hw.c.)
+bool dspic33ak_spi_i2s_tdm_hw_get_ss_pps_code( tdm_spi_inst_t inst, uint8_t* code );
+
 
 #endif // DSPIC33AK_SPI_I2S_TDM_HW_H

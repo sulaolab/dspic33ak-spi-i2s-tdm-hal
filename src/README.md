@@ -17,6 +17,11 @@ needs.
 - dsPIC33AK SPI framed mode (AUDEN=0, FRMEN=1) used as an I2S/TDM transport.
 - RX/TX ping-pong DMA, double-buffered.
 - One per-instance block callback per physical SPI: `cb(src, dst, user)`.
+- Selectable frame-sync waveform via `config.fs_shape`: `FS_PULSE` (short ~1-BCLK sync) or
+  `FS_50PCT` (50%-duty FS). I2S 50% is native; a TDM **master** gets a 50%-duty FS
+  synthesized by **CLC10** on the FS pin (auto-detected by PPS reverse-lookup; no app/CLC
+  code). A TDM slave receives FS as an input and ignores `fs_shape`. See
+  `dspic33ak_spi_i2s_tdm_fs_clc.{c,h}`.
 - `open` / `inst_configure` / `inst_start` / `inst_stop` / `close` lifecycle, plus
   `get_status` / `get_load` diagnostics (block count, deadline-miss, ISR load).
 - Optional board/clock **port** hook (`set_port()`) for pin/CLC routing and external-clock
@@ -97,8 +102,9 @@ State honestly:
   - I2S 2-slot, or TDM 4/8/16/32 from the HAL envelope.
   - In practice the default test path is I2S / TDM8 depending on project config.
   - **Slave** (external BCLK/FS) is the main tested path.
-  - A **master** (self-clocked) path exists but should be treated as less tested unless
-    confirmed on the target board.
+  - A **master** (self-clocked) path exists; the TDM8 master with `FS_50PCT` (CLC10-generated
+    50%-duty FS) was bench-verified on a dsPIC33AK Curiosity board (BCLK/FS = 256, `miss=0`).
+    Other master rate/format combinations should still be confirmed on the target board.
 
 ## 8. CMSIS-SAI relationship
 

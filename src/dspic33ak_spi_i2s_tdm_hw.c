@@ -156,7 +156,34 @@ void dspic33ak_spi_i2s_tdm_hw_apply_config( tdm_spi_inst_t inst,
     dspic33ak_spi_i2s_tdm_reg_clear(con1, DSPIC33AK_SPI_I2S_TDM_CON1_AUDEN);    // AUDEN=0 : Audio mode off
     dspic33ak_spi_i2s_tdm_reg_set  (con1, DSPIC33AK_SPI_I2S_TDM_CON1_FRMEN);    // FRMEN=1 : framed SPI (SSx = FSYNC)
 
-    dspic33ak_spi_i2s_tdm_reg_set_or_clear(con1, DSPIC33AK_SPI_I2S_TDM_CON1_FRMSYPW, cfg->fs_one_word_wide);  // FS pulse one word wide
+    // FS waveform shape -> FRMSYPW (pulse width) + fs_words (FRMCNT cadence). The public API
+    // is the INTENT (fs_shape); the mapping to silicon lives here:
+    //   FS_PULSE          : FRMSYPW=0 (1-BCLK short sync), one pulse per frame (fs_words=slots).
+    //   FS_50PCT + I2S    : FRMSYPW=1 (a one-word pulse IS 50% of a 2-word frame), per frame.
+    //   FS_50PCT + TDM    : FRMSYPW=0 + a HALF-frame marker (fs_words=slots/2); CLC10 toggles
+    //                       it into a 50%-duty FS on the FS pin (engaged by the core, master
+    //                       only). The DMA/buffer geometry stays sized by slots_per_fs.
+    const bool fs_50pct  = ( cfg->fs_shape == DSPIC33AK_SPI_I2S_TDM_FS_50PCT );
+    const bool is_i2s    = ( cfg->format   == DSPIC33AK_SPI_I2S_TDM_FORMAT_I2S );
+    const bool is_master = ( cfg->role     == DSPIC33AK_SPI_I2S_TDM_ROLE_MASTER );
+    bool    frmsypw;
+    uint8_t fs_words;
+    if( fs_50pct && is_i2s )
+    {
+        frmsypw  = true;                       // one word wide == 50% of the 2-word I2S frame
+        fs_words = cfg->slots_per_fs;
+    }
+    else if( fs_50pct && is_master )            // FS_50PCT + TDM MASTER: half-frame marker for CLC10
+    {
+        frmsypw  = false;                      // 1-BCLK marker (CLC10 makes the 50% duty)
+        fs_words = (uint8_t)(cfg->slots_per_fs / 2u);
+    }
+    else                                        // FS_PULSE, or ANY slave (incl. an FS_50PCT slave):
+    {                                           // a slave receives FS as an INPUT, so fs_shape has
+        frmsypw  = false;                      // no generated-waveform effect -> normal framing.
+        fs_words = cfg->slots_per_fs;          // (do NOT halve FRMCNT; CLC 50% is master-only.)
+    }
+    dspic33ak_spi_i2s_tdm_reg_set_or_clear(con1, DSPIC33AK_SPI_I2S_TDM_CON1_FRMSYPW, frmsypw);
 
     dspic33ak_spi_i2s_tdm_reg_set_or_clear(con1, DSPIC33AK_SPI_I2S_TDM_CON1_IGNROV, cfg->ignore_overflow);   // overflow not critical
     dspic33ak_spi_i2s_tdm_reg_set_or_clear(con1, DSPIC33AK_SPI_I2S_TDM_CON1_IGNTUR, cfg->ignore_underrun);   // underflow not critical
@@ -188,13 +215,14 @@ void dspic33ak_spi_i2s_tdm_hw_apply_config( tdm_spi_inst_t inst,
     dspic33ak_spi_i2s_tdm_reg_set_or_clear( con1, DSPIC33AK_SPI_I2S_TDM_CON1_FRMPOL,
                                             cfg->format != DSPIC33AK_SPI_I2S_TDM_FORMAT_I2S );
 
-    // FRMCNT: FS pulse every slots_per_fs words. Encoding = log2(slots):
+    // FRMCNT: FS pulse every N words (N = fs_words computed above). Encoding = log2(N):
     //   000 each word / 001 every 2 / 010 every 4 / 011 every 8 / 100 every 16 / 101 every 32.
-    // So I2S(2)->1, TDM4->2, TDM8->3, TDM16->4, TDM32->5. slots_per_fs is validated by
-    // the core's configure() against this set; default to TDM8 framing defensively.
+    // So per-frame: I2S(2)->1, TDM4->2, TDM8->3, TDM16->4, TDM32->5; the FS_50PCT+TDM
+    // half-frame marker halves N (TDM8->every 4 words->2, etc.). Defaults to TDM8 framing.
     uint32_t frmcnt;
-    switch( cfg->slots_per_fs )
+    switch( fs_words )
     {
+    case 1u:  frmcnt = 0u; break;
     case 2u:  frmcnt = 1u; break;
     case 4u:  frmcnt = 2u; break;
     case 8u:  frmcnt = 3u; break;
@@ -339,6 +367,39 @@ void dspic33ak_spi_i2s_tdm_hw_soft_stop( tdm_spi_inst_t inst )
     hw_spi_irq_enable( inst, false );
 
     dspic33ak_spi_i2s_tdm_hw_module_enable( inst, false );
+}
+
+
+/*
+ * PPS output-function code for one SPI instance's frame-sync (SSx).
+ *
+ * Data-sheet fact, device-#ifdef'd: each arm compiles only where the header defines that
+ * instance's SSx output (_RPOUT_SS<n>). The CLC10 50%-FS module uses this to reverse-scan
+ * the RPORx registers for the physical pin the board routed FS/SS to.
+ */
+bool dspic33ak_spi_i2s_tdm_hw_get_ss_pps_code( tdm_spi_inst_t inst, uint8_t* code )
+{
+    if( code == NULL )
+    {
+        return false;
+    }
+    switch( inst )
+    {
+#ifdef _RPOUT_SS1
+    case TDM_SPI1: *code = (uint8_t)_RPOUT_SS1; return true;
+#endif
+#ifdef _RPOUT_SS2
+    case TDM_SPI2: *code = (uint8_t)_RPOUT_SS2; return true;
+#endif
+#ifdef _RPOUT_SS3
+    case TDM_SPI3: *code = (uint8_t)_RPOUT_SS3; return true;
+#endif
+#if (DSPIC33AK_SPI_I2S_TDM_DEVICE == DSPIC33AK_SPI_I2S_TDM_DEV_AK512) && defined(_RPOUT_SS4)
+    case TDM_SPI4: *code = (uint8_t)_RPOUT_SS4; return true;
+#endif
+    default: break;
+    }
+    return false;
 }
 
 

@@ -46,7 +46,11 @@ a complete worked example.
 ## 2. What this HAL does NOT do
 
 - No codec init (e.g. WM8904) — that is board/app code.
-- No PPS/CLC pin routing in the core — reached only through the registered port hook.
+- No general board pin routing in the core — board FS/BCLK/DATA/MCLK routing is supplied by
+  the registered port hook. **Exception:** for `TDM master + FS_50PCT`, the HAL-owned CLC10
+  helper (`dspic33ak_spi_i2s_tdm_fs_clc.*`) does touch PPS/CLC — it temporarily repoints the
+  already-routed `SSx` FS pin to `CLC10OUT` (and routes `SSx`→RPV8) and restores it on
+  `release()`. This is the one place the core itself drives PPS/CLC.
 - No DSP — the callback owns any processing.
 - No sample-rate policy — the transport is rate-agnostic (runs at the configured BRG or
   the incoming external clock); the supported-rate set is an app concern.
@@ -82,6 +86,12 @@ Currently supported (silicon facts present):
 
 - `__dsPIC33AK512MPS512__`
 - `__dsPIC33AK128MC106__`
+
+> Note: the `FS_50PCT`-via-**CLC10** path (TDM master) is a feature of parts that have CLC10 +
+> virtual pin RPV8 — i.e. **AK512**. On **AK128** (no CLC10) it is unavailable: `engage()`
+> reports `NO_FS_PIN` and a TDM master can use `FS_PULSE`. `FS_PULSE` and I2S-native
+> `FS_50PCT` work on both parts. (The device itself is HAL-supported; only the CLC10 50%-FS
+> generator is AK512-only.)
 
 The HAL `#error`s on any other device. Adding a new dsPIC33AK part means adding its
 silicon facts in the HW layer (`dspic33ak_spi_i2s_tdm_hw.{c,h}`):

@@ -22,12 +22,17 @@ needs.
   synthesized by **CLC10** on the FS pin (auto-detected by PPS reverse-lookup; no app/CLC
   code). A TDM slave receives FS as an input and ignores `fs_shape`. See
   `dspic33ak_spi_i2s_tdm_fs_clc.{c,h}`.
-- `open` / `inst_configure` / `inst_start` / `inst_stop` / `close` lifecycle, plus
-  `get_status` / `get_load` diagnostics (block count, deadline-miss, ISR load).
+- Two configure/lifecycle paths: **system** `configure_system(setups, count)` (transactional,
+  all-or-nothing) + `open()` + `start_all_domains()`, or **single-instance**
+  `inst_configure(inst, cfg)` + `open()` + `inst_start(inst)`. `open()` takes **no role** —
+  it derives the clock role from the committed primary leg. Plus `get_status` / `get_load`
+  diagnostics (block count, deadline-miss, ISR load; the arg-less ones report the primary leg).
 - Optional board/clock **port** hook (`set_port()`) for pin/CLC routing and external-clock
   bring-up/readiness — the core calls only through this registered port.
-- Multi-instance: instance count / physical-SPI / DMA channels / format / block size all
-  come from the instance list in `conf.h`. Enumerate with `instance_count()` + `inst(i)`.
+- Multi-instance: leg count from `DSPIC33AK_TDM_USE_SPI2`; per-leg physical SPI + DMA channels
+  from `conf.h` `#define`s; per-leg format/role/geometry/sync-domain from the runtime config.
+  The core defines the leg enum/buffers/table/`_DMA<rx>Interrupt` vectors in explicit C (no
+  generator macro). Enumerate with `instance_count()` + `inst(i)`.
 
 ## 2. What this HAL does NOT do
 
@@ -47,8 +52,9 @@ needs.
 
 - The project MUST provide `dspic33ak_spi_i2s_tdm_conf.h` on the include path.
 - The HAL folder ships a self-contained template: `dspic33ak_spi_i2s_tdm_conf.h_example`.
-- Copy/rename the example (or supply an equivalent header) and edit the instance list +
-  geometry. `*.h_example` is never compiled.
+- Copy/rename the example (or supply an equivalent header) and edit the geometry, the leg
+  count (`DSPIC33AK_TDM_USE_SPI2`), the per-instance DMA channels, and the per-leg
+  `SYNC_DOMAIN` defaults. `*.h_example` is never compiled.
 - The template is self-contained (no app-config dependency). A project MAY instead derive
   the `DSPIC33AK_TDM_*` macros from its own app config (Perseus does this in
   `src/dspic33ak_spi_i2s_tdm_conf.h`); that is the integrator's choice and does not make
@@ -112,6 +118,10 @@ State honestly:
   - A **master** (self-clocked) path exists; the TDM8 master with `FS_50PCT` (CLC10-generated
     50%-duty FS) was bench-verified on a dsPIC33AK Curiosity board (BCLK/FS = 256, `miss=0`).
     Other master rate/format combinations should still be confirmed on the target board.
+- This snapshot is the **system-topology** model (transactional `configure_system()`,
+  `open()` with no role, per-domain framing validation), HW-verified in the upstream Perseus
+  source (co-clocked A/B, 94% load, deterministic phase-locked startup, CMSIS single-instance
+  loopback). A fresh on-board smoke of this standalone/starter snapshot is the remaining step.
 
 ## 8. CMSIS-SAI relationship
 
@@ -122,6 +132,29 @@ State honestly:
 - This HAL's native diagnostics use `block_deadline_miss_count`, `block_count`, and `load`.
 
 ---
+
+### Configuration model (summary)
+
+Two ways to configure, both ending in `open()` → start:
+
+- **System (transactional, recommended).** `configure_system(setups, count)` takes one
+  `leg_setup_t` per leg (`{ stream, sync_domain }`; `count` == the built leg count) and is
+  all-or-nothing. A side-effect-free PREFLIGHT rejects the whole call — touching no leg — if
+  any leg is running or outside the wire-format envelope, if a sync domain holds more than one
+  clock MASTER, if same-domain legs disagree on the frame interpretation (format / word_bits /
+  slots / block_frames / SPIFE / CKP / CKE), or if any `sync_domain` ≥ 32. Only after a clean
+  preflight are all legs committed together — no half-configured mix.
+- **Single-instance.** `inst_configure(inst, cfg)` + `open()` + `inst_start(inst)` for a
+  single-leg driver (e.g. a CMSIS-SAI wrapper).
+
+`open()` takes no role: it derives the clock role from the committed **primary** leg
+(`primary_leg_index`, default leg 0), failing `ERR_NOT_CONFIGURED` if the primary is
+unconfigured. `inst_get_setup(inst, &out)` reads a leg's committed setup (pure query; `false`
+for an unconfigured leg, distinct from a valid SLAVE). `start_all_domains()` starts each sync
+domain once, phase-locked (co-clocked members' `SPIEN` released back-to-back, slaves first,
+master last). The arg-less `is_running()` / `get_status()` / `get_load()` report the primary
+leg. A small **CANDIDATE, non-generic** co-clock-only API (`inst_tx_fill_ptr_mirror()`,
+`tx_active_half()` / `tx_active_pos()`) exists for dual-codec use and may change.
 
 ### Block-callback contract (summary)
 

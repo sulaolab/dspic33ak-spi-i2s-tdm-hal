@@ -36,12 +36,21 @@ a complete worked example.
     FRMSYNC marker, fed internally via virtual pin RPV8) on the same FS pin — no app/CLC code
     and no extra pin (the FS pin is auto-detected by PPS reverse-lookup). A TDM slave receives
     FS as an input, so it ignores `fs_shape`. See `dspic33ak_spi_i2s_tdm_fs_clc.{c,h}`.
-- `open` / `inst_configure` / `inst_start` / `inst_stop` / `close` lifecycle, plus
-  `get_status` / `get_load` diagnostics (block count, deadline-miss, ISR load).
+- Two configure/lifecycle paths (see "Configuration model" at the end):
+  - **System** (recommended, multi-leg): `configure_system(setups, count)` applies ALL legs
+    transactionally (all-or-nothing), then `open()` + `start_all_domains()`.
+  - **Single-instance**: `inst_configure(inst, cfg)` + `open()` + `inst_start(inst)`.
+  `open()` takes **no role** — it derives the clock role from the committed primary leg.
+  `inst_stop()` / `close()` tear down. Plus `get_status` / `get_load` diagnostics (block
+  count, deadline-miss, ISR load) — the arg-less ones report the primary leg.
 - Optional board/clock **port** hook (`set_port()`) for pin/CLC routing and external-clock
   bring-up/readiness — the core calls only through this registered port.
-- Multi-instance: instance count / physical-SPI / DMA channels / format / block size all
-  come from the instance list in `conf.h`. Enumerate with `instance_count()` + `inst(i)`.
+- Multi-instance: the leg count is chosen by `DSPIC33AK_TDM_USE_SPI2`; each leg's physical
+  SPI + RX/TX DMA channels come from per-instance `#define`s in `conf.h`; per-leg
+  format/role/geometry/sync-domain come from the runtime config
+  (`configure_system` / `inst_configure`). The core defines the leg enum, ping-pong buffers,
+  leg table, and `_DMA<rx>Interrupt` vectors in **explicit C** (no generator macro).
+  Enumerate with `instance_count()` + `inst(i)`.
 
 ## 2. What this HAL does NOT do
 
@@ -62,8 +71,10 @@ a complete worked example.
 
 - The project MUST provide `dspic33ak_spi_i2s_tdm_conf.h` on the include path.
 - The HAL folder ships a self-contained template: `dspic33ak_spi_i2s_tdm_conf.h_example`.
-- Copy/rename the example (or supply an equivalent header) and edit the instance list +
-  geometry. `*.h_example` is never compiled.
+- Copy/rename the example (or supply an equivalent header) and edit the geometry
+  (`DSPIC33AK_TDM_SLOTS_PER_FS` / `_BLOCK_FRAMES`), the leg count (`DSPIC33AK_TDM_USE_SPI2`),
+  the per-instance DMA channels, and the per-leg `SYNC_DOMAIN` defaults. `*.h_example` is
+  never compiled.
 - The template is self-contained (no app-config dependency). A project MAY instead derive
   the `DSPIC33AK_TDM_*` macros from its own app config (Perseus does this in
   `src/dspic33ak_spi_i2s_tdm_conf.h`); that is the integrator's choice and does not make
@@ -130,6 +141,12 @@ State honestly:
     50%-duty FS) was bench-verified on a dsPIC33AK Curiosity board (BCLK/FS = 256, `miss=0`,
     plus the single-codec starter demo and the Perseus dual-codec topology). Other
     master rate/format combinations should still be confirmed on the target board.
+- This snapshot is the **system-topology** model (transactional `configure_system()`,
+  `open()` with no role, per-domain framing validation). That code is HW-verified in the
+  upstream Perseus source — co-clocked dual-codec A/B, 80-stage/94% CPU load, deterministic
+  phase-locked startup (`miss=0`), and the CMSIS-SAI single-instance loopback. A fresh
+  on-board smoke of THIS standalone/starter snapshot (TDM8 / `FS_PULSE` / `FS_50PCT` /
+  stop→restart + the negative-config matrix) is the remaining verification step.
 
 ## 8. CMSIS-SAI relationship
 
@@ -140,6 +157,35 @@ State honestly:
 - This HAL's native diagnostics use `block_deadline_miss_count`, `block_count`, and `load`.
 
 ---
+
+### Configuration model (summary)
+
+Two ways to configure, both ending in `open()` → start:
+
+- **System (transactional, recommended).** `configure_system(setups, count)` takes one
+  `leg_setup_t` per leg (`{ stream, sync_domain }`; `count` == the built leg count) and is
+  all-or-nothing. A side-effect-free PREFLIGHT rejects the whole call — touching no leg — if
+  any leg is running or outside the wire-format envelope, if a sync domain holds more than one
+  clock MASTER, if two legs sharing a sync domain disagree on the frame interpretation
+  (format / word_bits / slots / block_frames / SPIFE / CKP / CKE), or if any `sync_domain`
+  is ≥ 32 (the domain id range `start_all_domains()` can track). Only after a clean preflight
+  are all legs committed together, so there is never a half-configured mix.
+- **Single-instance.** `inst_configure(inst, cfg)` validates + stores one leg's config; use
+  it with `open()` + `inst_start(inst)` for a single-leg driver (e.g. a CMSIS-SAI wrapper).
+
+`open()` takes no role: it derives the clock role from the committed **primary** leg
+(`primary_leg_index`, default leg 0) and passes it to the port hooks; it fails
+(`ERR_NOT_CONFIGURED`) if the primary is unconfigured. A board port hook that also routes a
+secondary leg reads that leg's committed role via `inst_get_setup(inst, &out)` (a pure query;
+returns `false` for an unconfigured leg — distinct from a valid SLAVE, role value 0 — so the
+hook can skip a leg not part of this run). `start_all_domains()` starts each sync domain once,
+releasing the co-clocked members' `SPIEN` back-to-back (slaves first, clock master last) so
+they latch one frame edge (phase-locked). The arg-less `is_running()` / `get_status()` /
+`get_load()` report the primary leg.
+
+A small **CANDIDATE, non-generic** API supports co-clocked dual-codec use only:
+`inst_tx_fill_ptr_mirror()` and the `tx_active_half()` / `tx_active_pos()` phase probes. A
+generic single- or independent-instance consumer does not need them; they may change or move.
 
 ### Block-callback contract (summary)
 

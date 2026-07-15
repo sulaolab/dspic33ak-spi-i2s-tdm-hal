@@ -165,7 +165,7 @@ void dspic33ak_spi_i2s_tdm_hw_apply_config( tdm_spi_inst_t inst,
     //                       only). The DMA/buffer geometry stays sized by slots_per_fs.
     const bool fs_50pct  = ( cfg->fs_shape == DSPIC33AK_SPI_I2S_TDM_FS_50PCT );
     const bool is_i2s    = ( cfg->format   == DSPIC33AK_SPI_I2S_TDM_FORMAT_I2S );
-    const bool is_master = ( cfg->role     == DSPIC33AK_SPI_I2S_TDM_ROLE_MASTER );
+    const bool is_master = ( cfg->clock_role     == DSPIC33AK_SPI_I2S_TDM_CLOCK_MASTER );
     bool    frmsypw;
     uint8_t fs_words;
     if( fs_50pct && is_i2s )
@@ -199,7 +199,7 @@ void dspic33ak_spi_i2s_tdm_hw_apply_config( tdm_spi_inst_t inst,
     dspic33ak_spi_i2s_tdm_reg_set_or_clear(con1, DSPIC33AK_SPI_I2S_TDM_CON1_MODE32, cfg->word_bits == 32u);  // MODE16 stays 0
     dspic33ak_spi_i2s_tdm_reg_set_or_clear(con1, DSPIC33AK_SPI_I2S_TDM_CON1_MCLKEN, cfg->mclk_enable);       // 1: CLKGEN9 / 0: std peripheral clock
 
-    if( cfg->role == DSPIC33AK_SPI_I2S_TDM_ROLE_MASTER )
+    if( cfg->clock_role == DSPIC33AK_SPI_I2S_TDM_CLOCK_MASTER )
     {
         dspic33ak_spi_i2s_tdm_reg_set  (con1, DSPIC33AK_SPI_I2S_TDM_CON1_MSTEN);    // MSTEN=1 : Host
         dspic33ak_spi_i2s_tdm_reg_clear(con1, DSPIC33AK_SPI_I2S_TDM_CON1_FRMSYNC);  // FRMSYNC=0 : FS output (host)

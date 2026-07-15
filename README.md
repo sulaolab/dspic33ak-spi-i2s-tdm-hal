@@ -45,12 +45,13 @@ a complete worked example.
   count, deadline-miss, ISR load) — the arg-less ones report the primary leg.
 - Optional board/clock **port** hook (`set_port()`) for pin/CLC routing and external-clock
   bring-up/readiness — the core calls only through this registered port.
-- Multi-instance: the leg count is chosen by `DSPIC33AK_TDM_USE_SPI2`; each leg's physical
-  SPI + RX/TX DMA channels come from per-instance `#define`s in `conf.h`; per-leg
-  format/role/geometry/sync-domain come from the runtime config
-  (`configure_system` / `inst_configure`). The core defines the leg enum, ping-pong buffers,
-  leg table, and `_DMA<rx>Interrupt` vectors in **explicit C** (no generator macro).
-  Enumerate with `instance_count()` + `inst(i)`.
+- Multi-instance: the leg count is chosen by `DSPIC33AK_TDM_USE_SPI2` (1 or 2). The
+  physical-SPI mapping is **fixed in the core** (leg 0 = SPI1, leg 1 = SPI2) -- it does NOT
+  come from `conf.h`. What `conf.h` supplies per leg is the RX/TX DMA channels, the geometry
+  (`SLOTS_PER_FS` / `BLOCK_FRAMES`), and the initial `SYNC_DOMAIN`; per-leg format / clock role
+  come from the runtime config (`configure_system` / `inst_configure`). The core defines the
+  leg enum, ping-pong buffers, leg table, and `_DMA<rx>Interrupt` vectors in **explicit C**
+  (no generator macro). Enumerate with `instance_count()` + `inst(i)`.
 
 ## 2. What this HAL does NOT do
 
@@ -157,6 +158,20 @@ State honestly:
 - This HAL's native diagnostics use `block_deadline_miss_count`, `block_count`, and `load`.
 
 ---
+
+### Migration from the pre-refactor HAL
+
+This is a **breaking** API change from the earlier X-macro / `BLOCK_REF` HAL. A consumer built
+against the old API will not compile until updated; the map:
+
+| Before | Now |
+|---|---|
+| `dspic33ak_spi_i2s_tdm_role_t`, `..._ROLE_MASTER` / `..._ROLE_SLAVE` | `..._clock_role_t`, `..._CLOCK_MASTER` / `..._CLOCK_SLAVE` |
+| `config_t.role` | `config_t.clock_role` |
+| `open(role)` | `open(void)` — role derived from the committed primary leg |
+| `DSPIC33AK_TDM_INSTANCE_LIST(X)` X-macro + `BLOCK_REF` / `FOLLOWER` | explicit SPI1 / optional SPI2 in the core; leg count via `DSPIC33AK_TDM_USE_SPI2` |
+| per-leg `inst_configure()` ×N for a multi-leg stream | `configure_system(setups, count)` (transactional, all-or-nothing) |
+| public `inst_arm()` / `inst_go()` | internal only — use `inst_start()` / `start_domain()` / `start_all_domains()` |
 
 ### Configuration model (summary)
 

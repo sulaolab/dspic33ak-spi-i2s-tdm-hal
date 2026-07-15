@@ -29,10 +29,12 @@ needs.
   diagnostics (block count, deadline-miss, ISR load; the arg-less ones report the primary leg).
 - Optional board/clock **port** hook (`set_port()`) for pin/CLC routing and external-clock
   bring-up/readiness — the core calls only through this registered port.
-- Multi-instance: leg count from `DSPIC33AK_TDM_USE_SPI2`; per-leg physical SPI + DMA channels
-  from `conf.h` `#define`s; per-leg format/role/geometry/sync-domain from the runtime config.
-  The core defines the leg enum/buffers/table/`_DMA<rx>Interrupt` vectors in explicit C (no
-  generator macro). Enumerate with `instance_count()` + `inst(i)`.
+- Multi-instance: leg count from `DSPIC33AK_TDM_USE_SPI2` (1 or 2). The physical-SPI mapping is
+  FIXED in the core (leg 0 = SPI1, leg 1 = SPI2), NOT from `conf.h`; `conf.h` supplies each leg's
+  DMA channels, geometry, and initial `SYNC_DOMAIN`. Per-leg format/role come from the runtime
+  config. The core defines the leg enum/buffers/table/`_DMA<rx>Interrupt` vectors in explicit C
+  (no generator macro). Enumerate with `instance_count()` + `inst(i)`. See the root README for a
+  pre-refactor -> current migration map.
 
 ## 2. What this HAL does NOT do
 

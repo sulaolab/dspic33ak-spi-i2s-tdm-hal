@@ -1282,14 +1282,36 @@ static void tdm_stop_domain_impl( uint8_t domain )
 }
 
 
-// Public SYSTEM-mode stop of one sync domain. Rejects (false, HW unchanged) unless the stream
-// was committed via configure_system() (mode==SYSTEM) -- a SINGLE-mode stream tears down through
-// inst_stop(). Idempotent success on an already-stopped SYSTEM domain.
+// Public SYSTEM-mode stop of one sync domain. Rejects (false, HW unchanged) unless the stream was
+// committed via configure_system() (mode==SYSTEM) -- a SINGLE-mode stream tears down through
+// inst_stop(). Symmetric with start_domain(): an out-of-range (>=32) or MEMBER-LESS domain is
+// ERR_BAD_INSTANCE (not a silent success); an existing-but-already-stopped domain is idempotent true.
 bool dspic33ak_spi_i2s_tdm_stop_domain( uint8_t domain )
 {
     if( s_config_mode != TDM_CONFIG_MODE_SYSTEM )
     {
         tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_CONFIG_MODE );
+        return false;
+    }
+    if( domain >= 32u )
+    {
+        tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_BAD_INSTANCE );
+        return false;
+    }
+    // Reject a domain with no member leg (an unknown id), mirroring start_domain()'s members==0 check.
+    uint8_t       members = 0u;
+    const uint8_t n       = dspic33ak_spi_i2s_tdm_instance_count();
+    for( uint8_t i = 0u; i < n; i++ )
+    {
+        const tdm_spi_leg_t *leg = dspic33ak_spi_i2s_tdm_inst( i );
+        if( ( leg != NULL ) && ( leg->sync_domain == domain ) )
+        {
+            members++;
+        }
+    }
+    if( members == 0u )
+    {
+        tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_BAD_INSTANCE );
         return false;
     }
     tdm_stop_domain_impl( domain );

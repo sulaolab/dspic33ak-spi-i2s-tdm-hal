@@ -220,8 +220,9 @@ typedef struct {
 // Board/clock PORT (optional hooks). The HAL core is board-free: instead of
 // calling the board adapter directly, it routes pin routing + external-clock
 // concerns through this fn-pointer table, which the platform layer
-// (audio_app) registers via set_port(). ALL of these hooks are consumed by open()
-// (NOT by the start* calls). Every field is optional; the fallible hooks return bool
+// (audio_app) registers via set_port(). Most of these hooks are consumed by open();
+// clock_source_ready() is ALSO re-checked by the start paths (inst_start/start_domain/
+// start_all_domains) immediately before arming. Every field is optional; the fallible hooks return bool
 // (false => open() aborts and returns false) and take the role open() derived from the
 // committed primary leg, so the platform can act differently for master vs slave:
 //   - configure_pins(role)  : PPS/GPIO routing for the role. false => unsupported
@@ -279,8 +280,9 @@ typedef struct {
 //    the _DMAnInterrupt vectors -- the integrator writes no ISR code. Opt-out (=0): the
 //    integrator owns the IVT and calls dspic33ak_spi_i2s_tdm_inst_rx_isr() from their
 //    own vector. TX is interrupt-less. Each RX vector is bound to its leg's conf.h RX-DMA
-//    channel by a compile-time assert -- change the channel in conf.h and the vector follows;
-//    a mismatch fails the build.)
+//    channel by a compile-time assert; the explicit vector name does NOT auto-follow, so changing
+//    the channel in conf.h fails the build until the matching _DMA<rx>Interrupt in the core is
+//    updated (or use DEFINE_DMA_VECTORS=0 + your own ISR). See the vector note near the end.)
 //===========================================================
 
 // Register the board/clock port (fn-pointer hooks above). Pass NULL to clear it

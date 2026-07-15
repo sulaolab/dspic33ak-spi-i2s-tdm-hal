@@ -157,6 +157,19 @@ static const tdm_spi_leg_t *tdm_stream_primary_leg( const tdm_stream_t *stream )
 static bool        tdm_spi_leg_get_effective_config( const tdm_spi_leg_t *leg,
                                                      dspic33ak_spi_i2s_tdm_config_t *effective_cfg );
 
+// Config-mode + lifecycle helpers (definitions below). tdm_inst_stop_impl is the
+// mode-agnostic per-leg teardown that both the public inst_stop() gate and the SYSTEM
+// domain teardown (stop_domain/stop_all_domains) call; tdm_stream_ready_for_start()
+// re-checks the clock-readiness gate just before a start; tdm_any_leg_running() /
+// tdm_inst_is_primary() back the lifecycle gates.
+static void        tdm_inst_stop_impl( tdm_spi_leg_t *inst );
+static bool        tdm_stream_ready_for_start( void );
+static bool        tdm_any_leg_running( void );
+static bool        tdm_inst_is_primary( const tdm_spi_leg_t *inst );
+// tdm_set_error() is defined further down (static inline); forward-declare it because the
+// lifecycle setters above its definition (set_port/close) now record an error code.
+static inline void tdm_set_error( dspic33ak_spi_i2s_tdm_error_t err );
+
 // RX-DMA IE bracket, config-envelope validation, and the per-instance RX-block ISR
 // body. Definitions live in the Local Function section; forward-declared here so the
 // global readers (get_load/get_status) and the ISR wrappers above their definitions
@@ -275,6 +288,47 @@ static tdm_stream_t s_stream =
     .port              = NULL,
 };
 
+// Configuration OWNERSHIP mode: how the currently-committed config was applied, which
+// selects the mutually-exclusive API surface. It is a property of the committed
+// CONFIGURATION, NOT the open/close lifecycle -- close() does NOT reset it (a closed
+// stream keeps its committed shape so the next open()->start uses the same API family).
+//   NONE   : nothing configured yet.
+//   SINGLE : committed via inst_configure() -> the per-leg PRIMARY-only API
+//            (inst_configure / inst_start / inst_stop) is in force.
+//   SYSTEM : committed via configure_system() -> the whole-system domain API
+//            (configure_system / start_domain / start_all_domains / stop_domain /
+//            stop_all_domains) is in force.
+// configure_system() may full-recommit from ANY mode (NONE/SINGLE/SYSTEM) while stopped;
+// once SYSTEM, inst_configure() is rejected (a system caller must stay transactional).
+typedef enum {
+    TDM_CONFIG_MODE_NONE = 0,
+    TDM_CONFIG_MODE_SINGLE,
+    TDM_CONFIG_MODE_SYSTEM,
+} tdm_config_mode_t;
+
+static tdm_config_mode_t s_config_mode = TDM_CONFIG_MODE_NONE;
+
+// Is this leg the stream's PRIMARY leg (the only leg the SINGLE per-leg API may touch)?
+static bool tdm_inst_is_primary( const tdm_spi_leg_t *inst )
+{
+    return ( inst != NULL ) && ( inst == tdm_stream_primary_leg( &s_stream ) );
+}
+
+// Any leg currently running? Backs the close()/set_port() "not while streaming" guards.
+static bool tdm_any_leg_running( void )
+{
+    const uint8_t n = s_stream.leg_count;
+    for( uint8_t i = 0u; i < n; i++ )
+    {
+        const tdm_spi_leg_t *leg = &s_stream.legs[i];
+        if( leg->running )
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 // The registered board/clock port is owned by the singleton stream context.
 // The table is held by pointer, not copied, so the caller must provide a
 // static/long-lived object. NULL is the board-free default: no pin routing,
@@ -335,10 +389,22 @@ TDM_COMPILEASSERT( TDM_ARRAY_SIZE(Rx_SPI2) == (2u * (DSPIC33AK_TDM_SLOTS_PER_FS)
  * The table is stored by pointer, not copied, so the caller must provide a
  * static/long-lived object. Passing NULL returns the HAL to its board-free
  * default: no pin routing, no clock gate, and no clock-change events.
+ *
+ * Rejected (false, port unchanged) while the port is already open()'d or any leg is
+ * running: open() consumes the port hooks (clock/pins/CLC), so swapping the port after
+ * open -- or under a live stream -- would leave the routed hardware disagreeing with the
+ * registered hooks. Call it before open() (typically once at init).
  */
-void dspic33ak_spi_i2s_tdm_set_port( const dspic33ak_spi_i2s_tdm_port_t* port )
+bool dspic33ak_spi_i2s_tdm_set_port( const dspic33ak_spi_i2s_tdm_port_t* port )
 {
+    if( s_stream.opened || tdm_any_leg_running() )
+    {
+        tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_ALREADY_OPEN );
+        return false;
+    }
     s_stream.port = port;
+    tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_NONE );
+    return true;
 }
 
 
@@ -367,6 +433,21 @@ bool dspic33ak_spi_i2s_tdm_is_active( void )
         return stream->port->clock_source_ready( role );
     }
     return true;
+}
+
+
+/*
+ * Re-check the clock-readiness gate immediately before a start (arm).
+ *
+ * open() checks readiness ONCE; between open() and start() an external BCLK/FS could drop.
+ * The start paths (inst_start / start_domain / start_all_domains) call this just before
+ * arming so a stream is not entered with the source already gone. Same gate as is_active()
+ * / open(): keyed on the PRIMARY leg's role and routed through the port. A self-clocked
+ * master (no port, or no clock_source_ready hook) is always ready. Returns true = go.
+ */
+static bool tdm_stream_ready_for_start( void )
+{
+    return dspic33ak_spi_i2s_tdm_is_active();
 }
 
 
@@ -684,6 +765,14 @@ bool dspic33ak_spi_i2s_tdm_open( void )
 {
     const tdm_stream_t *stream = &s_stream;
 
+    // Idempotent: a second open() while already open must NOT re-run the port hooks (they
+    // have side effects -- external-clock bring-up, CLC engage) -- just succeed.
+    if( s_stream.opened )
+    {
+        tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_NONE );
+        return true;
+    }
+
     // Verify the shared-engine topology ONCE here, before any clock/pin bring-up:
     // primary_leg_index in range, distinct physical SPIs, and distinct DMA channels across
     // all legs. This catches a leg-table misconfig (e.g. two legs on the same SPI, or a
@@ -742,11 +831,24 @@ bool dspic33ak_spi_i2s_tdm_open( void )
  * or the external clock -- other peripherals (or the next open()/start()) may depend
  * on them, and the port has no deinit hook. Provided for lifecycle symmetry and as
  * the place a future clock-deinit hook would run.
+ *
+ * Rejected (false, stays open) while any leg is still running: closing under a live stream
+ * would make the lifecycle state (closed) disagree with the hardware (SPI/DMA still on).
+ * Stop every leg first (inst_stop / stop_all_domains). Does NOT change the config mode --
+ * mode is a property of the committed configuration, not of open/close, so a closed stream
+ * keeps its SINGLE/SYSTEM shape for the next open()->start.
  */
-void dspic33ak_spi_i2s_tdm_close( void )
+bool dspic33ak_spi_i2s_tdm_close( void )
 {
+    if( tdm_any_leg_running() )
+    {
+        tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_ALREADY_RUNNING );
+        return false;
+    }
     s_stream.opened = false;   // a fresh open() is required before the next start/arm
-    // No hardware teardown by design (see above).
+    // No hardware teardown by design (see above). Config mode is intentionally preserved.
+    tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_NONE );
+    return true;
 }
 
 
@@ -758,11 +860,14 @@ void dspic33ak_spi_i2s_tdm_close( void )
 /*
  * Store a validated configuration for ONE instance (declaration only; no HW write).
  *
- * Rejected (false) if the instance is running or invalid, or cfg is outside the supported
- * wire-format envelope (NULL-safe). Just validates and stores cfg on the leg; each leg
- * carries its OWN clock role (there is no stream-wide rate tracking or force-slave policy --
- * the transport is rate-agnostic and a slave leg is SLAVE because it was configured SLAVE).
- * start() applies the stored config to the hardware.
+ * This is the SINGLE-mode, PRIMARY-only per-leg entry. Rejected (false) if: the port is
+ * already open()'d (ERR_ALREADY_OPEN -- configure before open); the stream was committed via
+ * configure_system() (mode==SYSTEM -> ERR_CONFIG_MODE; a system caller stays transactional);
+ * inst is not the primary leg (ERR_CONFIG_MODE -- a non-primary leg is only reachable through
+ * configure_system()); the instance is running or invalid; or cfg is outside the supported
+ * wire-format envelope (NULL-safe). On success the config is stored and the mode becomes
+ * SINGLE. Each leg carries its OWN clock role (the transport is rate-agnostic; a slave leg is
+ * SLAVE because it was configured SLAVE). start() applies the stored config to the hardware.
  */
 bool dspic33ak_spi_i2s_tdm_inst_configure( dspic33ak_spi_i2s_tdm_inst_t* inst,
                                            const dspic33ak_spi_i2s_tdm_config_t* cfg )
@@ -772,6 +877,26 @@ bool dspic33ak_spi_i2s_tdm_inst_configure( dspic33ak_spi_i2s_tdm_inst_t* inst,
     if( inst == NULL )
     {
         tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_BAD_INSTANCE );
+        return false;
+    }
+    // Configure happens BEFORE open(): open() consumes this config to derive the clock role
+    // and route pins/CLC, so configuring under an open port would desync HW from the config.
+    if( s_stream.opened )
+    {
+        tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_ALREADY_OPEN );
+        return false;
+    }
+    // Mode ownership: a SYSTEM-committed stream must be reconfigured only transactionally
+    // (configure_system); and the per-leg API only ever addresses the PRIMARY leg. A
+    // non-primary leg is configured exclusively through configure_system().
+    if( s_config_mode == TDM_CONFIG_MODE_SYSTEM )
+    {
+        tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_CONFIG_MODE );
+        return false;
+    }
+    if( !tdm_inst_is_primary( inst ) )
+    {
+        tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_CONFIG_MODE );
         return false;
     }
     if( inst->running )
@@ -805,6 +930,7 @@ bool dspic33ak_spi_i2s_tdm_inst_configure( dspic33ak_spi_i2s_tdm_inst_t* inst,
 
     inst->config       = *cfg;
     inst->config_valid = true;
+    s_config_mode      = TDM_CONFIG_MODE_SINGLE;   // per-leg primary API now owns the config
     tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_NONE );
     return true;
 }
@@ -884,6 +1010,14 @@ bool dspic33ak_spi_i2s_tdm_configure_system( const dspic33ak_spi_i2s_tdm_leg_set
         tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_BAD_ARGUMENT );
         return false;
     }
+    // Configure happens BEFORE open() (open() consumes the committed config). A full recommit
+    // is allowed from ANY mode (NONE/SINGLE/SYSTEM) as long as the port is closed and every
+    // leg is stopped (the STOPPED preflight below enforces the latter).
+    if( s_stream.opened )
+    {
+        tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_ALREADY_OPEN );
+        return false;
+    }
 
     // 1a. PREFLIGHT: each leg valid, stopped, and its stream supported. Zero side effects.
     for( uint8_t i = 0u; i < setup_count; i++ )
@@ -960,6 +1094,7 @@ bool dspic33ak_spi_i2s_tdm_configure_system( const dspic33ak_spi_i2s_tdm_leg_set
         leg->sync_domain  = setups[i].sync_domain;
         leg->config_valid = true;
     }
+    s_config_mode = TDM_CONFIG_MODE_SYSTEM;   // whole-system domain API now owns the config
     tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_NONE );
     return true;
 }
@@ -1090,9 +1225,23 @@ static void tdm_inst_go( dspic33ak_spi_i2s_tdm_inst_t* inst )
 }
 
 
-// Convenience: arm + go one instance (unchanged single-instance start behaviour).
+// Convenience: arm + go one instance (single-instance start). SINGLE-mode + PRIMARY-only:
+// the per-leg start path is for the one-leg (e.g. CMSIS-SAI) driver; a co-clocked group or
+// any non-primary leg must start through start_domain()/start_all_domains() so the domain
+// invariants (one master, matching framing, phase-locked release) are enforced. Also
+// re-checks clock readiness just before arming (the open->start drop window).
 bool dspic33ak_spi_i2s_tdm_inst_start( dspic33ak_spi_i2s_tdm_inst_t* inst )
 {
+    if( ( s_config_mode != TDM_CONFIG_MODE_SINGLE ) || !tdm_inst_is_primary( inst ) )
+    {
+        tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_CONFIG_MODE );
+        return false;
+    }
+    if( !tdm_stream_ready_for_start() )
+    {
+        tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_CLOCK_NOT_READY );
+        return false;
+    }
     if( !tdm_inst_arm( inst ) )
     {
         return false;
@@ -1103,6 +1252,8 @@ bool dspic33ak_spi_i2s_tdm_inst_start( dspic33ak_spi_i2s_tdm_inst_t* inst )
 
 
 // Stop every leg belonging to one sync domain (idempotent; safe on already-stopped legs).
+// SYSTEM-mode teardown -- uses the mode-agnostic per-leg impl so it tears down every member
+// regardless of the primary-only public gate.
 void dspic33ak_spi_i2s_tdm_stop_domain( uint8_t domain )
 {
     const uint8_t n = dspic33ak_spi_i2s_tdm_instance_count();
@@ -1111,41 +1262,37 @@ void dspic33ak_spi_i2s_tdm_stop_domain( uint8_t domain )
         dspic33ak_spi_i2s_tdm_inst_t* leg = dspic33ak_spi_i2s_tdm_inst( i );
         if( ( leg != NULL ) && ( leg->sync_domain == domain ) )
         {
-            dspic33ak_spi_i2s_tdm_inst_stop( leg );
+            tdm_inst_stop_impl( leg );
         }
     }
 }
 
 
-// Start every config_valid leg of one sync domain PHASE-LOCKED: (1) ARM all members, then
-// (2) release SPIEN back-to-back -- non-MASTER (slave/follower) legs first, the clock-MASTER
-// leg (config.clock_role==MASTER) LAST. The adjacent go() calls make the members' ping-pong DMAs
-// latch the same FS edge (external-FS domains have 0 masters -> all slaves go back-to-back;
-// an internal-FS domain's master starts its BCLK/FS after the slaves are armed and listening).
-// Returns false (and rolls the whole domain back to stopped) if any leg fails to arm, or if the
-// domain has no config_valid member. open() (shared clock/pins) must have run first; this does not.
-bool dspic33ak_spi_i2s_tdm_start_domain( uint8_t domain )
+// Side-effect-free classification of one sync domain, shared by start_domain() (its preflight)
+// and start_all_domains() (its whole-set preflight). A sync domain is a phase-locked UNIT whose
+// INVARIANTS are re-checked at START -- not only in configure_system() -- because a member may
+// have been (re)configured via the per-leg path afterwards. Sets *err ONLY for INVALID.
+//   INVALID     : an unconfigured member (NOT_CONFIGURED), >1 clock MASTER (TOPOLOGY), a
+//                 same-domain framing disagreement (TOPOLOGY), or no member at all (BAD_INSTANCE).
+//   STOPPED     : every member configured + stopped -> startable.
+//   ALL_RUNNING : every member already running -> a start is an idempotent no-op.
+//   PARTIAL     : some-but-not-all members running -> reject WITHOUT teardown (a re-assert must
+//                 not kill live audio; a half-running domain is a foreign/inconsistent state).
+typedef enum {
+    TDM_DOMAIN_INVALID = 0,
+    TDM_DOMAIN_STOPPED,
+    TDM_DOMAIN_ALL_RUNNING,
+    TDM_DOMAIN_PARTIAL,
+} tdm_domain_state_t;
+
+static tdm_domain_state_t tdm_domain_classify( uint8_t domain, dspic33ak_spi_i2s_tdm_error_t *err )
 {
-    const uint8_t n = dspic33ak_spi_i2s_tdm_instance_count();
-
-    // open() (shared clock/pins/CLC + readiness) MUST have run first.
-    if( !s_stream.opened )
-    {
-        tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_NOT_OPEN );
-        return false;
-    }
-
-    // PREFLIGHT (zero side effects). A sync domain is a phase-locked UNIT, so re-check its
-    // INVARIANTS at START -- not only in configure_system() -- because a member may have been
-    // (re)configured via the per-leg inst_configure() path afterwards. Every member must be
-    // configured; at most ONE clock MASTER (two would fight the shared BCLK/FS); and all members
-    // must agree on the frame interpretation (same-domain framing). Running members make this
-    // NON-DESTRUCTIVE: a fully-running domain is an idempotent success; a partial/foreign running
-    // state is rejected WITHOUT tearing the domain down (a supervisor re-assert must not kill audio).
+    const uint8_t        n       = dspic33ak_spi_i2s_tdm_instance_count();
     const tdm_spi_leg_t *ref     = NULL;
     uint8_t              members = 0u;
     uint8_t              masters = 0u;
     uint8_t              running = 0u;
+
     for( uint8_t i = 0u; i < n; i++ )
     {
         const tdm_spi_leg_t *leg = dspic33ak_spi_i2s_tdm_inst( i );
@@ -1156,8 +1303,8 @@ bool dspic33ak_spi_i2s_tdm_start_domain( uint8_t domain )
         members++;
         if( !leg->config_valid )
         {
-            tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_NOT_CONFIGURED );
-            return false;   // no side effects (do NOT stop_domain on a preflight reject)
+            *err = DSPIC33AK_SPI_I2S_TDM_ERR_NOT_CONFIGURED;
+            return TDM_DOMAIN_INVALID;
         }
         if( leg->config.clock_role == DSPIC33AK_SPI_I2S_TDM_CLOCK_MASTER )
         {
@@ -1173,29 +1320,77 @@ bool dspic33ak_spi_i2s_tdm_start_domain( uint8_t domain )
         }
         else if( !tdm_domain_framing_matches( &ref->config, &leg->config ) )
         {
-            tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_TOPOLOGY );
-            return false;
+            *err = DSPIC33AK_SPI_I2S_TDM_ERR_TOPOLOGY;
+            return TDM_DOMAIN_INVALID;
         }
     }
     if( members == 0u )
     {
-        tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_BAD_INSTANCE );
-        return false;
+        *err = DSPIC33AK_SPI_I2S_TDM_ERR_BAD_INSTANCE;
+        return TDM_DOMAIN_INVALID;
     }
     if( masters > 1u )
     {
-        tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_TOPOLOGY );
+        *err = DSPIC33AK_SPI_I2S_TDM_ERR_TOPOLOGY;
+        return TDM_DOMAIN_INVALID;
+    }
+    if( running == 0u )
+    {
+        return TDM_DOMAIN_STOPPED;
+    }
+    return ( running == members ) ? TDM_DOMAIN_ALL_RUNNING : TDM_DOMAIN_PARTIAL;
+}
+
+
+// Start every config_valid leg of one sync domain PHASE-LOCKED: (1) ARM all members, then
+// (2) release SPIEN back-to-back -- non-MASTER (slave/follower) legs first, the clock-MASTER
+// leg (config.clock_role==MASTER) LAST. The adjacent go() calls make the members' ping-pong DMAs
+// latch the same FS edge (external-FS domains have 0 masters -> all slaves go back-to-back;
+// an internal-FS domain's master starts its BCLK/FS after the slaves are armed and listening).
+// SYSTEM-mode API. Non-destructive: a fully-running domain is idempotent success; a partial/
+// invalid domain is rejected WITHOUT teardown. Returns false (and rolls back only THIS call's
+// arms) if a leg fails to arm. open() (shared clock/pins) must have run first; this does not.
+bool dspic33ak_spi_i2s_tdm_start_domain( uint8_t domain )
+{
+    const uint8_t                 n = dspic33ak_spi_i2s_tdm_instance_count();
+    dspic33ak_spi_i2s_tdm_error_t err;
+
+    // SYSTEM-mode ownership: domain start is only for a configure_system()-committed stream.
+    if( s_config_mode != TDM_CONFIG_MODE_SYSTEM )
+    {
+        tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_CONFIG_MODE );
         return false;
     }
-    if( running > 0u )
+    // open() (shared clock/pins/CLC + readiness) MUST have run first.
+    if( !s_stream.opened )
     {
-        if( running == members )
-        {
-            tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_NONE );
-            return true;    // already fully up -> idempotent no-op success
-        }
+        tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_NOT_OPEN );
+        return false;
+    }
+
+    // PREFLIGHT (zero side effects) via the shared classifier.
+    const tdm_domain_state_t state = tdm_domain_classify( domain, &err );
+    if( state == TDM_DOMAIN_INVALID )
+    {
+        tdm_set_error( err );
+        return false;   // no side effects (do NOT stop_domain on a preflight reject)
+    }
+    if( state == TDM_DOMAIN_ALL_RUNNING )
+    {
+        tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_NONE );
+        return true;    // already fully up -> idempotent no-op success
+    }
+    if( state == TDM_DOMAIN_PARTIAL )
+    {
         tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_ALREADY_RUNNING );
-        return false;       // partial running -> reject, leave the domain as-is
+        return false;   // partial running -> reject, leave the domain as-is
+    }
+
+    // STOPPED and about to arm: re-check the clock-readiness gate (the open->start drop window).
+    if( !tdm_stream_ready_for_start() )
+    {
+        tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_CLOCK_NOT_READY );
+        return false;
     }
 
     // (1) ARM every member. Preflight guaranteed all are stopped + configured, so a failure
@@ -1245,54 +1440,96 @@ bool dspic33ak_spi_i2s_tdm_start_domain( uint8_t domain )
 }
 
 
-// Start every sync domain present in the leg table (each once, via start_domain). Domains
-// are independent, so order is irrelevant. On any domain failure, stops all domains started so
-// far and returns false. Domain ids are expected in 0..31 (dedup mask). open() must run first.
+// Start every sync domain present in the leg table (each once). Domains are independent, so
+// order is irrelevant. SYSTEM-mode API. TWO PASSES so a later domain's failure can never tear
+// down a domain that was ALREADY running before this call (nor one this call did not touch):
+//   Pass 1 (side-effect-free): classify every DISTINCT domain. If ANY is PARTIAL or INVALID,
+//           reject the whole call touching NOTHING. Record which domains are STOPPED (startable).
+//           ALL_RUNNING domains are left running and are NOT recorded (never rolled back).
+//   Pass 2: start only the STOPPED domains, tracking newly_started_mask = domains THIS call
+//           actually started. On any failure, roll back ONLY newly_started_mask -- pre-existing
+//           running domains and untouched domains are preserved.
+// Returns false + ERR_NOT_CONFIGURED if no domain is configured. open() must run first.
 bool dspic33ak_spi_i2s_tdm_start_all_domains( void )
 {
-    const uint8_t n = dspic33ak_spi_i2s_tdm_instance_count();
-    uint32_t      started_mask = 0u;
-    bool          started_any  = false;
+    const uint8_t                 n = dspic33ak_spi_i2s_tdm_instance_count();
+    uint32_t                      seen_mask    = 0u;   // distinct domains examined
+    uint32_t                      stopped_mask = 0u;   // startable (all-stopped) domains
+    dspic33ak_spi_i2s_tdm_error_t err;
 
+    // SYSTEM-mode ownership + open() precondition.
+    if( s_config_mode != TDM_CONFIG_MODE_SYSTEM )
+    {
+        tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_CONFIG_MODE );
+        return false;
+    }
     if( !s_stream.opened )
     {
         tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_NOT_OPEN );
         return false;
     }
+
+    // PASS 1: classify every distinct configured domain, side-effect-free. Any PARTIAL/INVALID
+    // domain rejects the whole call before a single leg is touched.
     for( uint8_t i = 0u; i < n; i++ )
     {
-        dspic33ak_spi_i2s_tdm_inst_t* leg = dspic33ak_spi_i2s_tdm_inst( i );
+        const tdm_spi_leg_t* leg = dspic33ak_spi_i2s_tdm_inst( i );
         if( ( leg == NULL ) || !leg->config_valid )
         {
             continue;
         }
         const uint8_t dom = leg->sync_domain;
-        if( ( dom < 32u ) && ( ( started_mask & ( 1uL << dom ) ) != 0u ) )
+        if( ( dom >= 32u ) || ( ( seen_mask & ( 1uL << dom ) ) != 0u ) )
         {
-            continue;   // this domain already started
+            continue;   // >=32 is rejected at configure; skip duplicates
         }
-        if( dom < 32u )
+        seen_mask |= ( 1uL << dom );
+
+        const tdm_domain_state_t state = tdm_domain_classify( dom, &err );
+        if( state == TDM_DOMAIN_INVALID )
         {
-            started_mask |= ( 1uL << dom );
+            tdm_set_error( err );
+            return false;   // touch nothing
+        }
+        if( state == TDM_DOMAIN_PARTIAL )
+        {
+            tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_ALREADY_RUNNING );
+            return false;   // touch nothing (do NOT tear a half-running domain down)
+        }
+        if( state == TDM_DOMAIN_STOPPED )
+        {
+            stopped_mask |= ( 1uL << dom );
+        }
+        // ALL_RUNNING: leave it running, not recorded -> never rolled back.
+    }
+    if( seen_mask == 0u )
+    {
+        tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_NOT_CONFIGURED );
+        return false;   // no configured domain to start
+    }
+
+    // PASS 2: start only the STOPPED domains; roll back ONLY what this call started.
+    uint32_t newly_started_mask = 0u;
+    for( uint8_t dom = 0u; dom < 32u; dom++ )
+    {
+        if( ( stopped_mask & ( 1uL << dom ) ) == 0u )
+        {
+            continue;
         }
         if( !dspic33ak_spi_i2s_tdm_start_domain( dom ) )
         {
             for( uint8_t d = 0u; d < 32u; d++ )
             {
-                if( ( started_mask & ( 1uL << d ) ) != 0u )
+                if( ( newly_started_mask & ( 1uL << d ) ) != 0u )
                 {
                     dspic33ak_spi_i2s_tdm_stop_domain( d );
                 }
             }
-            return false;
+            return false;   // pre-existing running domains untouched
         }
-        started_any = true;
+        newly_started_mask |= ( 1uL << dom );
     }
-    if( !started_any )
-    {
-        tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_NOT_CONFIGURED );
-        return false;   // no configured domain to start (was: silently returned true)
-    }
+    tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_NONE );
     return true;
 }
 
@@ -1308,7 +1545,7 @@ void dspic33ak_spi_i2s_tdm_stop_all_domains( void )
         dspic33ak_spi_i2s_tdm_inst_t* leg = dspic33ak_spi_i2s_tdm_inst( i );
         if( leg != NULL )
         {
-            dspic33ak_spi_i2s_tdm_inst_stop( leg );
+            tdm_inst_stop_impl( leg );
         }
     }
 }
@@ -1323,14 +1560,18 @@ void dspic33ak_spi_i2s_tdm_stop_all_domains( void )
 
 
 /*
- * Stop ONE instance and make its next start deterministic.
+ * Stop ONE instance and make its next start deterministic (MODE-AGNOSTIC implementation).
  *
  * SoftStop policy (per instance): does NOT stop DMACONbits.ON (shared controller) or
  * change PPS/CLC routing; stops only this instance's SPI module + DMA channels, masks
  * its DMA IRQs first so its ISR cannot refill mid-teardown, clears its pending
  * status, and clears its buffers so a restart is silent. Safe to call when stopped.
+ *
+ * This static core carries no mode/primary gate so the SYSTEM domain teardown
+ * (stop_domain/stop_all_domains) can tear down every member leg. The public inst_stop()
+ * below wraps it with the SINGLE-mode + primary-only gate.
  */
-void dspic33ak_spi_i2s_tdm_inst_stop( dspic33ak_spi_i2s_tdm_inst_t* inst )
+static void tdm_inst_stop_impl( tdm_spi_leg_t *inst )
 {
     if( ( inst == NULL ) || !tdm_spi_leg_is_valid( inst ) )
     {
@@ -1352,6 +1593,26 @@ void dspic33ak_spi_i2s_tdm_inst_stop( dspic33ak_spi_i2s_tdm_inst_t* inst )
     tdm_inst_clear_dma_flags( inst );
     dspic33ak_spi_i2s_tdm_hw_irq_clear_flags( inst->spi_inst );
     tdm_inst_clear_buffers( inst );
+}
+
+
+/*
+ * Public per-instance stop: SINGLE-mode + PRIMARY-only, symmetric with inst_start().
+ *
+ * Rejected (false) when the stream was committed via configure_system() (mode==SYSTEM ->
+ * tear down through stop_domain()/stop_all_domains() instead) or inst is not the primary
+ * leg. Returns true after the teardown (or if the primary was already stopped -- idempotent).
+ */
+bool dspic33ak_spi_i2s_tdm_inst_stop( dspic33ak_spi_i2s_tdm_inst_t* inst )
+{
+    if( ( s_config_mode != TDM_CONFIG_MODE_SINGLE ) || !tdm_inst_is_primary( inst ) )
+    {
+        tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_CONFIG_MODE );
+        return false;
+    }
+    tdm_inst_stop_impl( inst );
+    tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_NONE );
+    return true;
 }
 
 

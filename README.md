@@ -188,6 +188,18 @@ Two ways to configure, both ending in `open()` → start:
 - **Single-instance.** `inst_configure(inst, cfg)` validates + stores one leg's config; use
   it with `open()` + `inst_start(inst)` for a single-leg driver (e.g. a CMSIS-SAI wrapper).
 
+The two paths establish a mutually-exclusive **config-ownership mode** — a property of the
+committed configuration, independent of the open/close lifecycle (`close()` does not reset it):
+`inst_configure()` → **SINGLE**, in which the per-leg API (`inst_configure`/`inst_start`/
+`inst_stop`) is legal only on the **primary** leg; `configure_system()` → **SYSTEM**, in which the
+whole-system domain API (`configure_system`/`start_domain`/`start_all_domains`/`stop_domain`/
+`stop_all_domains`) is legal. A call from the wrong family (or a non-primary leg via `inst_*`)
+returns `ERR_CONFIG_MODE`; `configure_system()` may full-recommit from any stopped+closed mode.
+`open()` is idempotent (a second call re-runs no hooks); `close()` and `set_port()` return `bool`
+and reject while a leg is running (or, for `set_port()`, while open). The start paths re-check the
+clock-readiness gate immediately before arming, so a source that drops between `open()` and start
+fails the start (`ERR_CLOCK_NOT_READY`).
+
 `open()` takes no role: it derives the clock role from the committed **primary** leg
 (`primary_leg_index`, default leg 0) and passes it to the port hooks; it fails
 (`ERR_NOT_CONFIGURED`) if the primary is unconfigured. A board port hook that also routes a

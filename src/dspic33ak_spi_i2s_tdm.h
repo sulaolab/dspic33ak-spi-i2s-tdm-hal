@@ -21,10 +21,11 @@
 #endif
 
 //===========================================================
-// dspic33ak_spi_i2s_tdm.{c,h} + dspic33ak_spi_i2s_tdm_reg.h = the CANDIDATE public
-// HAL core (a Perseus-derived reusable SPI/I2S/TDM transport core, pending a
-// standalone carve-out -- NOT yet a fully generic published HAL; see the deferred
-// deps below). It does: SPI framed-mode (I2S/TDM) setup, DMA + ping-pong buffers,
+// dspic33ak_spi_i2s_tdm.{c,h} + dspic33ak_spi_i2s_tdm_reg.h = the reusable SPI/I2S/TDM
+// transport HAL core (Perseus-derived; also published standalone as dspic33ak-spi-i2s-tdm-hal
+// and vendored into dspic33ak-hal-starter -- the same source across all three). Known
+// sibling-HAL dependencies are listed below. It does: SPI framed-mode (I2S/TDM) setup,
+// DMA + ping-pong buffers,
 // block callback, start/stop/configure/get_status, and deadline-miss + load
 // diagnostics. It is RATE-AGNOSTIC (no sample-rate state/API -- runs at the configured
 // BRG / external clock). It does NOT do DSP, codec (WM8904), PPS/CLC pins, or app config
@@ -39,10 +40,12 @@
 // config (conf.h_example in the HAL folder) is self-contained and app-independent.
 // The in-tree project config (src/dspic33ak_spi_i2s_tdm_conf.h) may derive
 // DSPIC33AK_TDM_* from APP_* for automatic consistency; that is the project's
-// integration choice, not the HAL's requirement. Instance count is chosen by
-// DSPIC33AK_TDM_USE_SPI2 and the physical-SPI/DMA assignment by the per-instance channel
-// #defines in conf.h; the core's leg enum, buffers, leg table, and _DMA<rx>Interrupt
-// vectors are explicit C keyed off those (no generator macro). Supported-device limitation:
+// integration choice, not the HAL's requirement. Instance COUNT is chosen by
+// DSPIC33AK_TDM_USE_SPI2 (1 or 2). The physical-SPI mapping is FIXED IN THE CORE (leg 0 =
+// SPI1, leg 1 = SPI2) -- it does NOT come from conf.h; conf.h supplies only each leg's RX/TX
+// DMA channels, geometry (SLOTS_PER_FS / BLOCK_FRAMES), and initial SYNC_DOMAIN seed. The
+// core's leg enum, buffers, leg table, and _DMA<rx>Interrupt vectors are explicit C keyed off
+// those (no generator macro). Supported-device limitation:
 // the silicon-facts paths cover __dsPIC33AK512MPS512__ / __dsPIC33AK128MC106__ only (the
 // core #error's otherwise; other parts need their facts added). Known sibling-HAL
 // dependencies: dspic33ak_dma (required), and the load monitor's use of the hal_timer
@@ -259,12 +262,13 @@ typedef struct {
 //   - open()/close()     : shared board/clock port bring-up/teardown (once for the
 //                          engine, role-aware) -- see the per-instance lifecycle block
 //                          below.
-//   - inst_start()/inst_stop(): per-instance transport lifecycle. The app sequences
-//                          configure each -> open() -> start each (co-clocked slaves first,
-//                          the clock master last) -> ... -> stop each -> close(). inst_start()
-//                          returns true only if it actually started (false, instance
-//                          stopped, if not configured / already running / rate
-//                          unsupported / DMA setup fails) and never blocks.
+//   - inst_start()/inst_stop(): SINGLE-mode, PRIMARY-only per-instance lifecycle (a single-leg
+//                          driver): configure the primary -> open() -> inst_start(primary) ->
+//                          ... -> inst_stop(primary) -> close(). inst_start() returns true only
+//                          if it actually started (false, instance stopped, if the wrong
+//                          config-mode/leg, not configured, already running, the clock is not
+//                          ready, or DMA setup fails) and never blocks. A co-clocked group uses
+//                          the domain API below.
 //   - is_active()        : clock/source readiness gate (NOT running).
 //   - is_running()       : primary-leg running state (start..stop).
 //   - get_load()/get_status()       : primary leg (default SPI1) load / status.
@@ -273,14 +277,18 @@ typedef struct {
 //   (DMA interrupt vectors: default (DSPIC33AK_TDM_DEFINE_DMA_VECTORS=1) the HAL owns
 //    the _DMAnInterrupt vectors -- the integrator writes no ISR code. Opt-out (=0): the
 //    integrator owns the IVT and calls dspic33ak_spi_i2s_tdm_inst_rx_isr() from their
-//    own vector. TX is interrupt-less. Channel conflict: remap in conf.h.)
+//    own vector. TX is interrupt-less. Each RX vector is bound to its leg's conf.h RX-DMA
+//    channel by a compile-time assert -- change the channel in conf.h and the vector follows;
+//    a mismatch fails the build.)
 //===========================================================
 
 // Register the board/clock port (fn-pointer hooks above). Pass NULL to clear it
 // (revert to the self-clocked, no-gate default). Call before inst_configure()/open()
 // (e.g. from the platform layer at init). The pointer is stored, not copied -- it
-// must outlive the stream (use a static/const table).
-extern void dspic33ak_spi_i2s_tdm_set_port( const dspic33ak_spi_i2s_tdm_port_t* port );
+// must outlive the stream (use a static/const table). Returns false (port unchanged,
+// ERR_ALREADY_OPEN) if the port is already open()'d or any leg is running -- open()
+// consumes the hooks, so the port must be fixed before open().
+extern bool dspic33ak_spi_i2s_tdm_set_port( const dspic33ak_spi_i2s_tdm_port_t* port );
 
 // Instance handles. The leg count is configurable (DSPIC33AK_TDM_USE_SPI2). instance_count()
 // returns how many instances this build has; inst(i) returns the i-th handle in leg-table
@@ -336,22 +344,36 @@ extern bool dspic33ak_spi_i2s_tdm_set_block_callback( dspic33ak_spi_i2s_tdm_inst
                                                       dspic33ak_spi_i2s_tdm_block_cb_t cb,
                                                       void* user );
 
-// ---- Per-instance lifecycle (the app owns multi-instance ordering) ----
+// ---- Lifecycle + configuration-ownership mode ----
+// The two configure paths establish a mutually-exclusive OWNERSHIP mode that selects which
+// start/stop API is legal (the mode is a property of the committed configuration, INDEPENDENT
+// of open/close -- close() does NOT reset it):
+//   * inst_configure()  -> SINGLE mode. The per-leg PRIMARY-only API is in force:
+//                          inst_configure / inst_start / inst_stop, and ONLY on the primary
+//                          leg. A non-primary leg or a SYSTEM-committed stream is rejected
+//                          (ERR_CONFIG_MODE). For a single-leg driver (e.g. CMSIS-SAI).
+//   * configure_system() -> SYSTEM mode. The whole-system domain API is in force:
+//                          configure_system / start_domain / start_all_domains / stop_domain /
+//                          stop_all_domains. inst_start/inst_stop/inst_configure are rejected
+//                          (ERR_CONFIG_MODE). configure_system() may full-recommit from ANY
+//                          mode while closed+stopped.
 // open() brings up the SHARED board/clock port (external clock + pins + CLC) ONCE for the
 // engine. It takes NO role argument: the HAL derives the clock role from the COMMITTED
 // primary leg (primary_leg_index) and passes THAT to the port hooks, so the pin/clock
 // direction can never disagree with the configured stream. Returns false (do not start any
 // instance) if the primary leg is not configured, the external clock can't be brought up /
 // isn't ready, or a pin/CLC hook rejects the role. With no port registered it is a no-op
-// success. It never blocks and touches no SPI/DMA. close() is the symmetric teardown: a
-// near-no-op, since the HAL deliberately never tears down PPS/CLC or the clock (other
-// peripherals may depend on them; reserved for a future clock-deinit hook).
-// Typical sequence: configure_system() (or inst_configure each) -> open() ->
-// start_all_domains() (or per-leg inst_start: co-clocked slaves first, the clock master
-// last) -> ... -> stop -> close(). inst_start arms only that instance and requires open()
-// first.
+// success. A second open() while already open is an idempotent success (hooks are NOT re-run).
+// It never blocks and touches no SPI/DMA. close() is the symmetric teardown: it returns false
+// (stays open, ERR_ALREADY_RUNNING) if any leg is still running -- stop first -- else clears
+// the open state. It is otherwise a near-no-op: the HAL deliberately never tears down PPS/CLC
+// or the clock (other peripherals may depend on them; reserved for a future clock-deinit hook),
+// and it does NOT change the config mode. The start paths re-check clock readiness just before
+// arming, so a source that drops between open() and start() fails the start (ERR_CLOCK_NOT_READY).
+// Typical sequence: configure_system() (or inst_configure the primary) -> open() ->
+// start_all_domains() (or, in SINGLE mode, inst_start the primary) -> ... -> stop -> close().
 extern bool dspic33ak_spi_i2s_tdm_open( void );
-extern void dspic33ak_spi_i2s_tdm_close( void );
+extern bool dspic33ak_spi_i2s_tdm_close( void );
 extern bool dspic33ak_spi_i2s_tdm_inst_configure( dspic33ak_spi_i2s_tdm_inst_t* inst,
                                                   const dspic33ak_spi_i2s_tdm_config_t* cfg );
 
@@ -389,8 +411,13 @@ extern bool dspic33ak_spi_i2s_tdm_configure_system( const dspic33ak_spi_i2s_tdm_
 // configured the primary) returns false, so the caller can SKIP it rather than assume a role.
 extern bool dspic33ak_spi_i2s_tdm_inst_get_setup( const dspic33ak_spi_i2s_tdm_inst_t* inst,
                                                   dspic33ak_spi_i2s_tdm_leg_setup_t* setup );
+// SINGLE-mode, PRIMARY-only per-leg start/stop (a co-clocked group or non-primary leg must use
+// start_domain/start_all_domains). inst_start() returns false (ERR_CONFIG_MODE) unless the stream
+// was committed via inst_configure() AND inst is the primary leg; it also re-checks clock
+// readiness before arming. inst_stop() likewise returns false (ERR_CONFIG_MODE) in SYSTEM mode or
+// for a non-primary leg; true after the (idempotent) teardown.
 extern bool dspic33ak_spi_i2s_tdm_inst_start( dspic33ak_spi_i2s_tdm_inst_t* inst );
-extern void dspic33ak_spi_i2s_tdm_inst_stop( dspic33ak_spi_i2s_tdm_inst_t* inst );
+extern bool dspic33ak_spi_i2s_tdm_inst_stop( dspic33ak_spi_i2s_tdm_inst_t* inst );
 // NOTE: the internal arm/go split (program+arm DMA/SPI with the module OFF, then release SPIEN
 // back-to-back so co-clocked legs latch one FS edge = phase-locked) is NOT public. It has no
 // armed-state / open-gate of its own, so exposing it would let a caller enable SPI out of
@@ -425,8 +452,8 @@ extern dspic33ak_spi_i2s_tdm_clock_event_t dspic33ak_spi_i2s_tdm_consume_clock_e
 // used by the CMSIS-SAI wrapper to validate ARM_SAI AUDIO_FREQ. Runtime rate DETECTION +
 // the stop->reconfigure->start it drives live in the application.
 
-// Snapshot the load monitor / status. The singleton forms report the block-timing
-// reference (SPI1); the inst forms report a specific instance (use spi1()/spi2()).
+// Snapshot the load monitor / status. The singleton forms report the PRIMARY leg
+// (primary_leg_index, default SPI1); the inst forms report a specific instance (use spi1()/spi2()).
 // For the inst forms, block_count/deadline_miss/load AND running are that instance's;
 // only active (the clock/source readiness gate) is engine-wide/shared.
 // clear_peak resets that instance's min/max/event peaks after the snapshot.
@@ -464,6 +491,10 @@ typedef enum {
     DSPIC33AK_SPI_I2S_TDM_ERR_CLC,                 // port clc_passthrough hook failed
     DSPIC33AK_SPI_I2S_TDM_ERR_DMA_CONFIG,          // DMA channel setup failed
     DSPIC33AK_SPI_I2S_TDM_ERR_NOT_OPEN,            // start/arm attempted before a successful open()
+    DSPIC33AK_SPI_I2S_TDM_ERR_ALREADY_OPEN,        // configure/set_port attempted while open()'d
+    DSPIC33AK_SPI_I2S_TDM_ERR_CONFIG_MODE,         // wrong configure-ownership mode for this call
+                                                   // (e.g. inst_* under SYSTEM / a non-primary leg,
+                                                   // or start_domain under SINGLE)
 } dspic33ak_spi_i2s_tdm_error_t;
 
 extern dspic33ak_spi_i2s_tdm_error_t dspic33ak_spi_i2s_tdm_get_last_error( void );

@@ -149,6 +149,13 @@ Two ways to configure, both ending in `open()` → start:
 - **Single-instance.** `inst_configure(inst, cfg)` + `open()` + `inst_start(inst)` for a
   single-leg driver (e.g. a CMSIS-SAI wrapper).
 
+The two paths establish a mutually-exclusive **config-ownership mode** (a property of the committed
+config, independent of open/close): `inst_configure()` → SINGLE (the per-leg `inst_*` API is
+PRIMARY-leg only), `configure_system()` → SYSTEM (the `*_domain` API). Using the other family's
+calls returns `ERR_CONFIG_MODE`; `configure_system()` may full-recommit from any stopped mode.
+`open()` is idempotent; `close()`/`set_port()` return `bool` and reject while running/open. The
+start paths re-check clock readiness just before arming.
+
 `open()` takes no role: it derives the clock role from the committed **primary** leg
 (`primary_leg_index`, default leg 0), failing `ERR_NOT_CONFIGURED` if the primary is
 unconfigured. `inst_get_setup(inst, &out)` reads a leg's committed setup (pure query; `false`

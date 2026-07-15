@@ -104,7 +104,7 @@
 // is a source edit in the core (enum value + buffer pair + s_spi_legs[] row +
 // _DMA<rx>Interrupt vector) plus its channel #defines above -- there is no macro row list.
 // The per-leg clock role / stream shape are set at runtime by the integrator's config
-// (dspic33ak_spi_i2s_tdm_configure() / _configure_system()), not here.
+// (dspic33ak_spi_i2s_tdm_inst_configure() / _configure_system()), not here.
 //===========================================================
 
 // Per-leg SYNC DOMAIN id: the s_spi_legs[] default (a caller using configure_system() may
@@ -121,10 +121,11 @@
 
 // sync_domain must be 0..31 (start_all_domains()'s dedup/rollback mask range). The core also
 // rejects an out-of-range domain at inst_configure()/configure_system(), but catch it here too.
-#if (DSPIC33AK_TDM_SPI1_SYNC_DOMAIN >= 32)
+// Reject negatives as well as >=31: a negative literal would cast to a large uint8_t at runtime.
+#if ((DSPIC33AK_TDM_SPI1_SYNC_DOMAIN) < 0) || ((DSPIC33AK_TDM_SPI1_SYNC_DOMAIN) >= 32)
 #error "DSPIC33AK_TDM_SPI1_SYNC_DOMAIN must be in 0..31."
 #endif
-#if DSPIC33AK_TDM_USE_SPI2 && (DSPIC33AK_TDM_SPI2_SYNC_DOMAIN >= 32)
+#if DSPIC33AK_TDM_USE_SPI2 && (((DSPIC33AK_TDM_SPI2_SYNC_DOMAIN) < 0) || ((DSPIC33AK_TDM_SPI2_SYNC_DOMAIN) >= 32))
 #error "DSPIC33AK_TDM_SPI2_SYNC_DOMAIN must be in 0..31."
 #endif
 

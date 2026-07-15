@@ -121,7 +121,7 @@
 
 // sync_domain must be 0..31 (start_all_domains()'s dedup/rollback mask range). The core also
 // rejects an out-of-range domain at inst_configure()/configure_system(), but catch it here too.
-// Reject negatives as well as >=31: a negative literal would cast to a large uint8_t at runtime.
+// Reject negatives as well as >=32: a negative literal would cast to a large uint8_t at runtime.
 #if ((DSPIC33AK_TDM_SPI1_SYNC_DOMAIN) < 0) || ((DSPIC33AK_TDM_SPI1_SYNC_DOMAIN) >= 32)
 #error "DSPIC33AK_TDM_SPI1_SYNC_DOMAIN must be in 0..31."
 #endif

@@ -1228,13 +1228,27 @@ static void tdm_inst_go( dspic33ak_spi_i2s_tdm_inst_t* inst )
 // Convenience: arm + go one instance (single-instance start). SINGLE-mode + PRIMARY-only:
 // the per-leg start path is for the one-leg (e.g. CMSIS-SAI) driver; a co-clocked group or
 // any non-primary leg must start through start_domain()/start_all_domains() so the domain
-// invariants (one master, matching framing, phase-locked release) are enforced. Also
-// re-checks clock readiness just before arming (the open->start drop window).
+// invariants (one master, matching framing, phase-locked release) are enforced.
+//
+// Validation order (matches start_domain()): instance validity -> config mode -> primary ->
+// opened -> clock readiness -> arm -> go. opened is checked BEFORE readiness so a start before
+// open() returns ERR_NOT_OPEN (not a readiness-hook verdict), and the readiness re-check (the
+// open->start drop window) only runs once open() has already brought the clock source up.
 bool dspic33ak_spi_i2s_tdm_inst_start( dspic33ak_spi_i2s_tdm_inst_t* inst )
 {
+    if( ( inst == NULL ) || !tdm_spi_leg_is_valid( inst ) )
+    {
+        tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_BAD_INSTANCE );
+        return false;
+    }
     if( ( s_config_mode != TDM_CONFIG_MODE_SINGLE ) || !tdm_inst_is_primary( inst ) )
     {
         tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_CONFIG_MODE );
+        return false;
+    }
+    if( !s_stream.opened )
+    {
+        tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_NOT_OPEN );
         return false;
     }
     if( !tdm_stream_ready_for_start() )
@@ -1251,10 +1265,10 @@ bool dspic33ak_spi_i2s_tdm_inst_start( dspic33ak_spi_i2s_tdm_inst_t* inst )
 }
 
 
-// Stop every leg belonging to one sync domain (idempotent; safe on already-stopped legs).
-// SYSTEM-mode teardown -- uses the mode-agnostic per-leg impl so it tears down every member
-// regardless of the primary-only public gate.
-void dspic33ak_spi_i2s_tdm_stop_domain( uint8_t domain )
+// Mode-agnostic teardown of every leg in one sync domain (idempotent; safe on stopped legs).
+// PRIVATE: no config-mode gate, so the internal rollback in start_domain()/start_all_domains()
+// and the public SYSTEM wrappers can both use it. Tears down every member via the per-leg impl.
+static void tdm_stop_domain_impl( uint8_t domain )
 {
     const uint8_t n = dspic33ak_spi_i2s_tdm_instance_count();
     for( uint8_t i = 0u; i < n; i++ )
@@ -1265,6 +1279,22 @@ void dspic33ak_spi_i2s_tdm_stop_domain( uint8_t domain )
             tdm_inst_stop_impl( leg );
         }
     }
+}
+
+
+// Public SYSTEM-mode stop of one sync domain. Rejects (false, HW unchanged) unless the stream
+// was committed via configure_system() (mode==SYSTEM) -- a SINGLE-mode stream tears down through
+// inst_stop(). Idempotent success on an already-stopped SYSTEM domain.
+bool dspic33ak_spi_i2s_tdm_stop_domain( uint8_t domain )
+{
+    if( s_config_mode != TDM_CONFIG_MODE_SYSTEM )
+    {
+        tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_CONFIG_MODE );
+        return false;
+    }
+    tdm_stop_domain_impl( domain );
+    tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_NONE );
+    return true;
 }
 
 
@@ -1404,7 +1434,7 @@ bool dspic33ak_spi_i2s_tdm_start_domain( uint8_t domain )
         }
         if( !tdm_inst_arm( leg ) )
         {
-            dspic33ak_spi_i2s_tdm_stop_domain( domain );   // roll back only this call's arms
+            tdm_stop_domain_impl( domain );   // roll back only this call's arms (mode-agnostic)
             return false;
         }
     }
@@ -1522,7 +1552,7 @@ bool dspic33ak_spi_i2s_tdm_start_all_domains( void )
             {
                 if( ( newly_started_mask & ( 1uL << d ) ) != 0u )
                 {
-                    dspic33ak_spi_i2s_tdm_stop_domain( d );
+                    tdm_stop_domain_impl( d );   // mode-agnostic; roll back only newly-started
                 }
             }
             return false;   // pre-existing running domains untouched
@@ -1534,10 +1564,10 @@ bool dspic33ak_spi_i2s_tdm_start_all_domains( void )
 }
 
 
-// Stop every instance (all sync domains). Domain-level teardown counterpart to start_all_domains
-// so callers never enumerate individual legs (SPI1/SPI2/...): future SPI3/SPI4 in any domain are
-// covered automatically. Idempotent; safe on already-stopped legs.
-void dspic33ak_spi_i2s_tdm_stop_all_domains( void )
+// Mode-agnostic teardown of every instance (all sync domains). PRIVATE counterpart used by the
+// public SYSTEM wrapper below (and available for internal use). Covers future SPI3/SPI4 in any
+// domain automatically. Idempotent; safe on already-stopped legs.
+static void tdm_stop_all_domains_impl( void )
 {
     const uint8_t n = dspic33ak_spi_i2s_tdm_instance_count();
     for( uint8_t i = 0u; i < n; i++ )
@@ -1548,6 +1578,23 @@ void dspic33ak_spi_i2s_tdm_stop_all_domains( void )
             tdm_inst_stop_impl( leg );
         }
     }
+}
+
+
+// Public SYSTEM-mode stop of every sync domain. Domain-level teardown counterpart to
+// start_all_domains() so callers never enumerate individual legs (SPI1/SPI2/...). Rejects
+// (false, HW unchanged) unless the stream was committed via configure_system() (mode==SYSTEM);
+// a SINGLE-mode stream tears down through inst_stop(). Idempotent success otherwise.
+bool dspic33ak_spi_i2s_tdm_stop_all_domains( void )
+{
+    if( s_config_mode != TDM_CONFIG_MODE_SYSTEM )
+    {
+        tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_CONFIG_MODE );
+        return false;
+    }
+    tdm_stop_all_domains_impl();
+    tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_NONE );
+    return true;
 }
 
 
@@ -1599,12 +1646,18 @@ static void tdm_inst_stop_impl( tdm_spi_leg_t *inst )
 /*
  * Public per-instance stop: SINGLE-mode + PRIMARY-only, symmetric with inst_start().
  *
- * Rejected (false) when the stream was committed via configure_system() (mode==SYSTEM ->
- * tear down through stop_domain()/stop_all_domains() instead) or inst is not the primary
- * leg. Returns true after the teardown (or if the primary was already stopped -- idempotent).
+ * Validation order matches inst_start(): a NULL/invalid handle is ERR_BAD_INSTANCE FIRST, then
+ * the mode/primary gate. Rejected (false) when the stream was committed via configure_system()
+ * (mode==SYSTEM -> tear down through stop_domain()/stop_all_domains() instead) or inst is not the
+ * primary leg. Returns true after the teardown (or if the primary was already stopped -- idempotent).
  */
 bool dspic33ak_spi_i2s_tdm_inst_stop( dspic33ak_spi_i2s_tdm_inst_t* inst )
 {
+    if( ( inst == NULL ) || !tdm_spi_leg_is_valid( inst ) )
+    {
+        tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_BAD_INSTANCE );
+        return false;
+    }
     if( ( s_config_mode != TDM_CONFIG_MODE_SINGLE ) || !tdm_inst_is_primary( inst ) )
     {
         tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_CONFIG_MODE );

@@ -232,11 +232,12 @@ typedef struct {
 //   - clock_source_init(role): bring up an external (e.g. USB-audio) clock. false
 //                             => open() fails. NULL => no external clock to bring up.
 //   - clock_source_ready(role): external-clock readiness; drives is_active() and a
-//                             SINGLE non-blocking check in OPEN() (open() does NOT wait --
-//                             it returns false if not ready, leaving retry to the
-//                             platform/app). The start* calls do NOT re-check readiness, so
-//                             if the clock may drop after open() gate on is_active() or
-//                             re-open(). NULL => always ready (no clock gate).
+//                             non-blocking check in OPEN() (open() does NOT wait -- it returns
+//                             false if not ready, leaving retry to the platform/app). It is ALSO
+//                             re-checked once by each start path (inst_start/start_domain/
+//                             start_all_domains) immediately before arming, so a source that
+//                             drops between open() and start fails the start (ERR_CLOCK_NOT_READY)
+//                             rather than entering a dead stream. NULL => always ready (no gate).
 //   - consume_clock_event() : read-and-clear the ext-clock stop/resume edge; NULL
 //                             => always NONE.
 // With NO port registered the core behaves as a self-clocked transport with no
@@ -307,7 +308,8 @@ extern dspic33ak_spi_i2s_tdm_inst_t* dspic33ak_spi_i2s_tdm_spi2( void );
 // exist for the Perseus single-producer co-clocked A/B path (one leg's callback fills the
 // other leg's TX, plus phase probes measuring SPI1/SPI2 alignment). A generic single- or
 // independent-instance consumer does NOT need them. They are NOT part of the minimal public
-// transport contract and may change or move when the standalone HAL is carved out.
+// transport contract and may change or move if that minimal transport contract is narrowed or
+// reorganized.
 //===========================================================
 
 // Return one instance's current writable TX ping-pong half (the half NOT being
@@ -424,14 +426,17 @@ extern bool dspic33ak_spi_i2s_tdm_inst_stop( dspic33ak_spi_i2s_tdm_inst_t* inst 
 // sequence. Phase-locked co-clocked startup is delivered through start_domain() /
 // start_all_domains() (which arm then release internally); a single leg uses inst_start().
 
-// Sync-domain group start/stop. A domain = the set of legs sharing sync_domain (declared per
-// leg as DSPIC33AK_TDM_<name>_SYNC_DOMAIN). start_domain arms all members then releases SPIEN
-// back-to-back (non-master legs first, clock-master last) so co-clocked members latch one FS
-// edge = phase-locked. start_all_domains starts every domain once. open() must run first.
+// Sync-domain group start/stop -- the SYSTEM-mode API (stream committed via configure_system()).
+// A domain = the set of legs sharing sync_domain. start_domain arms all members then releases
+// SPIEN back-to-back (non-master legs first, clock-master last) so co-clocked members latch one FS
+// edge = phase-locked. start_all_domains starts every domain once. open() must run first. All four
+// return false with ERR_CONFIG_MODE if the stream was committed via inst_configure() (SINGLE mode)
+// -- a SINGLE-mode stream starts/stops through inst_start()/inst_stop(). stop_domain/stop_all_domains
+// return true after teardown (idempotent on an already-stopped SYSTEM domain).
 extern bool dspic33ak_spi_i2s_tdm_start_domain( uint8_t domain );
-extern void dspic33ak_spi_i2s_tdm_stop_domain( uint8_t domain );
+extern bool dspic33ak_spi_i2s_tdm_stop_domain( uint8_t domain );
 extern bool dspic33ak_spi_i2s_tdm_start_all_domains( void );
-extern void dspic33ak_spi_i2s_tdm_stop_all_domains( void );
+extern bool dspic33ak_spi_i2s_tdm_stop_all_domains( void );
 
 // Return the clock/source readiness gate. This can be true while the transport is
 // stopped; use is_running() when the question is "is audio streaming now?"
@@ -467,14 +472,14 @@ extern bool dspic33ak_spi_i2s_tdm_inst_get_status( dspic33ak_spi_i2s_tdm_inst_t*
                                                    bool clear_peak );
 
 
-// Last-error diagnostic. The bool-returning calls (open / inst_configure / inst_start /
-// set_block_callback) collapse several failure causes into one `false`; get_last_error()
-// returns the most
-// specific reason recorded by the most recent such call (ERR_NONE after a success). This
-// is a DEBUG aid only -- NOT stream health: deadline misses / block counts live in
-// get_status(), not here. It is the "last failed API reason", not a per-instance latch,
-// and is intentionally not strictly interrupt/multi-core safe (a plain last-writer-wins
-// store -- adequate as a 16-bit-MCU debug hint).
+// Last-error diagnostic. The bool-returning calls (set_port / open / close / inst_configure /
+// configure_system / inst_start / inst_stop / start_domain / start_all_domains / stop_domain /
+// stop_all_domains / set_block_callback) collapse several failure causes into one `false`;
+// get_last_error() returns the most specific reason recorded by the most recent such call
+// (ERR_NONE after a success). This is a DEBUG aid only -- NOT stream health: deadline misses /
+// block counts live in get_status(), not here. It is the "last failed API reason", not a
+// per-instance latch, and is intentionally not strictly interrupt/multi-core safe (a plain
+// last-writer-wins store -- adequate as a 16-bit-MCU debug hint).
 typedef enum {
     DSPIC33AK_SPI_I2S_TDM_ERR_NONE = 0,
     DSPIC33AK_SPI_I2S_TDM_ERR_BAD_INSTANCE,        // NULL / out-of-range instance handle
@@ -504,10 +509,14 @@ extern dspic33ak_spi_i2s_tdm_error_t dspic33ak_spi_i2s_tdm_get_last_error( void 
 // so the integrator writes NO interrupt/DMA code -- just registers a per-instance block
 // callback. TX is interrupt-less (fire-and-forget ping-pong with auto-reload; hw.c
 // enables the CPU IRQ on the RX channel only). RX/TX channel numbers come from conf.h and
-// are baked in as compile-time constants so the DMA register access folds. To yield an
-// IVT slot to another subsystem, either remap the SPI's channel in conf.h, or take full
-// vector ownership: set DSPIC33AK_TDM_DEFINE_DMA_VECTORS=0 (the HAL then defines no
-// vectors) and call inst_rx_isr() below from your own _DMA<rx>Interrupt for each instance.
+// are baked in as compile-time constants so the DMA register access folds. The HAL-owned RX
+// vectors are EXPLICIT (_DMA0Interrupt / _DMA2Interrupt for the default channels), each bound
+// to its leg's conf.h RX-DMA channel by a compile-time assert -- so simply changing a leg's
+// RX-DMA channel in conf.h fails the build until the matching explicit vector in the core
+// source is updated too (the vector name does not auto-follow). To hand an IVT slot to another
+// subsystem without touching the core, take full vector ownership: set
+// DSPIC33AK_TDM_DEFINE_DMA_VECTORS=0 (the HAL then defines no vectors) and call inst_rx_isr()
+// below from your own _DMA<rx>Interrupt for each instance. (See conf.h_example for the same note.)
 
 // RX-block ISR entry for one instance, for the DSPIC33AK_TDM_DEFINE_DMA_VECTORS=0
 // (vector-ownership opt-out) path: call it from your own _DMA<rx>Interrupt for that

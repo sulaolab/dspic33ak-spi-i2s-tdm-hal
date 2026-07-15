@@ -144,17 +144,21 @@ Two ways to configure, both ending in `open()` → start:
   all-or-nothing. A side-effect-free PREFLIGHT rejects the whole call — touching no leg — if
   any leg is running or outside the wire-format envelope, if a sync domain holds more than one
   clock MASTER, if same-domain legs disagree on the frame interpretation (format / word_bits /
-  slots / block_frames / SPIFE / CKP / CKE), or if any `sync_domain` ≥ 32. Only after a clean
-  preflight are all legs committed together — no half-configured mix.
+  slots / block_frames / SPIFE / CKP / CKE / `fs_shape`), or if any `sync_domain` ≥ 32. Only after
+  a clean preflight are all legs committed together — no half-configured mix.
 - **Single-instance.** `inst_configure(inst, cfg)` + `open()` + `inst_start(inst)` for a
   single-leg driver (e.g. a CMSIS-SAI wrapper).
 
 The two paths establish a mutually-exclusive **config-ownership mode** (a property of the committed
-config, independent of open/close): `inst_configure()` → SINGLE (the per-leg `inst_*` API is
-PRIMARY-leg only), `configure_system()` → SYSTEM (the `*_domain` API). Using the other family's
-calls returns `ERR_CONFIG_MODE`; `configure_system()` may full-recommit from any stopped mode.
-`open()` is idempotent; `close()`/`set_port()` return `bool` and reject while running/open. The
-start paths re-check clock readiness just before arming.
+config, independent of open/close — `close()` does NOT reset it): `inst_configure()` → SINGLE (the
+per-leg `inst_configure`/`inst_start`/`inst_stop` API, PRIMARY-leg only), `configure_system()` →
+SYSTEM (the `configure_system`/`start_domain`/`start_all_domains`/`stop_domain`/`stop_all_domains`
+API). A call from the other family — or a non-primary leg via `inst_*` — returns `ERR_CONFIG_MODE`.
+The latch is one-way in practice: `configure_system()` may full-recommit from any stopped mode
+(SINGLE→SYSTEM ok), but there is no runtime SYSTEM→SINGLE reset (a compile-time-fixed integration
+never needs one; switching a running product from the domain API to a single-leg SAI driver takes a
+power cycle). `open()` is idempotent (a second call re-runs no hooks); `close()`/`set_port()` return
+`bool` and reject while running/open. The start paths re-check clock readiness just before arming.
 
 `open()` takes no role: it derives the clock role from the committed **primary** leg
 (`primary_leg_index`, default leg 0), failing `ERR_NOT_CONFIGURED` if the primary is
@@ -175,7 +179,9 @@ instance runs no DSP path (its zeroed TX half stays silent).
 
 ### Diagnosing a failed call
 
-`open()` / `inst_configure()` / `inst_start()` return `bool`. On `false`,
-`dspic33ak_spi_i2s_tdm_get_last_error()` returns the most specific reason
+The bool-returning calls — `set_port()`, `open()`, `close()`, `inst_configure()`,
+`configure_system()`, `inst_start()`, `inst_stop()`, `start_domain()`, `start_all_domains()`,
+`stop_domain()`, `stop_all_domains()`, `set_block_callback()` — collapse several causes into one
+`false`. On `false`, `dspic33ak_spi_i2s_tdm_get_last_error()` returns the most specific reason
 (`dspic33ak_spi_i2s_tdm_error_t`). This is a debug aid only — stream health (deadline
 misses, block counts) lives in `get_status()`, not here.

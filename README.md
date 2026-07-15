@@ -182,9 +182,9 @@ Two ways to configure, both ending in `open()` → start:
   all-or-nothing. A side-effect-free PREFLIGHT rejects the whole call — touching no leg — if
   any leg is running or outside the wire-format envelope, if a sync domain holds more than one
   clock MASTER, if two legs sharing a sync domain disagree on the frame interpretation
-  (format / word_bits / slots / block_frames / SPIFE / CKP / CKE), or if any `sync_domain`
-  is ≥ 32 (the domain id range `start_all_domains()` can track). Only after a clean preflight
-  are all legs committed together, so there is never a half-configured mix.
+  (format / word_bits / slots / block_frames / SPIFE / CKP / CKE / `fs_shape`), or if any
+  `sync_domain` is ≥ 32 (the domain id range `start_all_domains()` can track). Only after a clean
+  preflight are all legs committed together, so there is never a half-configured mix.
 - **Single-instance.** `inst_configure(inst, cfg)` validates + stores one leg's config; use
   it with `open()` + `inst_start(inst)` for a single-leg driver (e.g. a CMSIS-SAI wrapper).
 
@@ -194,7 +194,10 @@ committed configuration, independent of the open/close lifecycle (`close()` does
 `inst_stop`) is legal only on the **primary** leg; `configure_system()` → **SYSTEM**, in which the
 whole-system domain API (`configure_system`/`start_domain`/`start_all_domains`/`stop_domain`/
 `stop_all_domains`) is legal. A call from the wrong family (or a non-primary leg via `inst_*`)
-returns `ERR_CONFIG_MODE`; `configure_system()` may full-recommit from any stopped+closed mode.
+returns `ERR_CONFIG_MODE`. The latch is one-way in practice: `configure_system()` may full-recommit
+from any stopped+closed mode (SINGLE→SYSTEM ok), but there is no runtime SYSTEM→SINGLE reset — a
+compile-time-fixed integration never needs one, and switching a running product from the domain API
+to a single-leg SAI driver takes a power cycle.
 `open()` is idempotent (a second call re-runs no hooks); `close()` and `set_port()` return `bool`
 and reject while a leg is running (or, for `set_port()`, while open). The start paths re-check the
 clock-readiness gate immediately before arming, so a source that drops between `open()` and start
@@ -224,7 +227,9 @@ instance runs no DSP path (its zeroed TX half stays silent).
 
 ### Diagnosing a failed call
 
-`open()` / `inst_configure()` / `inst_start()` return `bool`. On `false`,
-`dspic33ak_spi_i2s_tdm_get_last_error()` returns the most specific reason
+The bool-returning calls — `set_port()`, `open()`, `close()`, `inst_configure()`,
+`configure_system()`, `inst_start()`, `inst_stop()`, `start_domain()`, `start_all_domains()`,
+`stop_domain()`, `stop_all_domains()`, `set_block_callback()` — collapse several causes into one
+`false`. On `false`, `dspic33ak_spi_i2s_tdm_get_last_error()` returns the most specific reason
 (`dspic33ak_spi_i2s_tdm_error_t`). This is a debug aid only — stream health (deadline
 misses, block counts) lives in `get_status()`, not here.

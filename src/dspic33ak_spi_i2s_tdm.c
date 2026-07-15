@@ -122,6 +122,10 @@ typedef struct
     // own RX-block ISR, so this is only a reporting default, NOT a clock-role or timing
     // coupling. Replaces the former per-leg is_block_timing_master "exactly one, leg 0" flag.
     uint8_t                             primary_leg_index;
+    // open() succeeded (external clock up + pins/CLC routed via the port). start/arm are
+    // gated on this so a caller cannot enter SPIEN with the port unrouted / readiness
+    // unchecked (a silent dead stream). Set by open(), cleared by close().
+    bool                                opened;
     const dspic33ak_spi_i2s_tdm_port_t *port;
 
     // Block callback, diagnostics, and the running flag are now owned PER INSTANCE
@@ -267,6 +271,7 @@ static tdm_stream_t s_stream =
     .legs              = s_spi_legs,
     .leg_count         = (uint8_t)TDM_ARRAY_SIZE(s_spi_legs),
     .primary_leg_index = (uint8_t)TDM_SPI_LEG_SPI1,   // leg 0 (SPI1) = co-clock anchor / singleton-reporting leg
+    .opened            = false,
     .port              = NULL,
 };
 
@@ -724,6 +729,7 @@ bool dspic33ak_spi_i2s_tdm_open( void )
             return false;
         }
     }
+    s_stream.opened = true;   // port up: start/arm may now proceed
     tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_NONE );
     return true;
 }
@@ -739,6 +745,7 @@ bool dspic33ak_spi_i2s_tdm_open( void )
  */
 void dspic33ak_spi_i2s_tdm_close( void )
 {
+    s_stream.opened = false;   // a fresh open() is required before the next start/arm
     // No hardware teardown by design (see above).
 }
 
@@ -787,6 +794,14 @@ bool dspic33ak_spi_i2s_tdm_inst_configure( dspic33ak_spi_i2s_tdm_inst_t* inst,
         tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_UNSUPPORTED_CONFIG );
         return false;
     }
+    // The leg's sync_domain (from the conf.h seed here; configure_system overwrites it) must fit
+    // the 0..31 range start_all_domains()'s dedup/rollback mask can track -- guard the per-leg
+    // path too (configure_system already checks it). See also the conf.h SYNC_DOMAIN #error.
+    if( inst->sync_domain >= 32u )
+    {
+        tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_TOPOLOGY );
+        return false;
+    }
 
     inst->config       = *cfg;
     inst->config_valid = true;
@@ -824,10 +839,12 @@ bool dspic33ak_spi_i2s_tdm_inst_get_setup( const dspic33ak_spi_i2s_tdm_inst_t* i
  * define HOW that shared clock is read must be identical on every member -- otherwise the
  * legs would sample the same wires with different framing. Compared: format, word_bits,
  * slots_per_fs, block_frames, fs_coincides_first_bclk (SPIFE), bclk_idle_high (CKP),
- * bclk_change_on_active_to_idle (CKE). Deliberately NOT compared (may differ per leg):
- * clock_role (exactly one master drives, the rest are slaves), brg (a slave ignores it),
- * mclk_enable, ignore_overflow/underrun, and fs_shape (a slave's FS is an input, so its
- * fs_shape has no generated-waveform effect -- the master leg defines the waveform).
+ * bclk_change_on_active_to_idle (CKE), AND fs_shape. fs_shape is compared because for I2S it
+ * maps to FRMSYPW regardless of clock role (hw: FS_50PCT+I2S -> FRMSYPW=1, FS_PULSE -> 0), so
+ * two co-clocked I2S legs with different fs_shape would read the SAME FS with different pulse
+ * widths. Deliberately NOT compared (may legitimately differ per leg): clock_role (exactly one
+ * master drives the shared clock, the rest are slaves), brg (a slave ignores it), mclk_enable,
+ * and ignore_overflow/underrun.
  */
 static bool tdm_domain_framing_matches( const dspic33ak_spi_i2s_tdm_config_t* a,
                                         const dspic33ak_spi_i2s_tdm_config_t* b )
@@ -838,7 +855,8 @@ static bool tdm_domain_framing_matches( const dspic33ak_spi_i2s_tdm_config_t* a,
            ( a->block_frames                  == b->block_frames ) &&
            ( a->fs_coincides_first_bclk       == b->fs_coincides_first_bclk ) &&
            ( a->bclk_idle_high                == b->bclk_idle_high ) &&
-           ( a->bclk_change_on_active_to_idle == b->bclk_change_on_active_to_idle );
+           ( a->bclk_change_on_active_to_idle == b->bclk_change_on_active_to_idle ) &&
+           ( a->fs_shape                      == b->fs_shape );
 }
 
 
@@ -963,7 +981,7 @@ bool dspic33ak_spi_i2s_tdm_configure_system( const dspic33ak_spi_i2s_tdm_leg_set
 // several co-clocked legs and then release them back-to-back (both SPIEN within one FS frame)
 // so their ping-pong DMAs latch the SAME first FS edge = phase-locked (wdiff=0). Returns false
 // (rolled back) on any failure, same as inst_start().
-bool dspic33ak_spi_i2s_tdm_inst_arm( dspic33ak_spi_i2s_tdm_inst_t* inst )
+static bool tdm_inst_arm( dspic33ak_spi_i2s_tdm_inst_t* inst )
 {
     dspic33ak_spi_i2s_tdm_config_t eff_cfg;
 
@@ -982,6 +1000,13 @@ bool dspic33ak_spi_i2s_tdm_inst_arm( dspic33ak_spi_i2s_tdm_inst_t* inst )
     if( inst->running )
     {
         tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_ALREADY_RUNNING );
+        return false;
+    }
+    // open() (shared clock/pins/CLC + readiness) must have run first -- arming DMA/SPI without
+    // it would enter SPIEN with the port unrouted (a silent dead stream). Fail closed.
+    if( !s_stream.opened )
+    {
+        tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_NOT_OPEN );
         return false;
     }
     // Resolve the register-level config (a validated copy of the leg's own stored config).
@@ -1054,7 +1079,7 @@ fail:
 // this starts on the next FS edge; for a master it begins generating BCLK/FS. Issue the go()
 // of co-clocked legs back-to-back (slaves first, an internal FS master last) so all latch the
 // same FS. No-op-safe only on an armed instance; call exactly once after inst_arm().
-void dspic33ak_spi_i2s_tdm_inst_go( dspic33ak_spi_i2s_tdm_inst_t* inst )
+static void tdm_inst_go( dspic33ak_spi_i2s_tdm_inst_t* inst )
 {
     if( ( inst == NULL ) || !tdm_spi_leg_is_valid( inst ) )
     {
@@ -1068,11 +1093,11 @@ void dspic33ak_spi_i2s_tdm_inst_go( dspic33ak_spi_i2s_tdm_inst_t* inst )
 // Convenience: arm + go one instance (unchanged single-instance start behaviour).
 bool dspic33ak_spi_i2s_tdm_inst_start( dspic33ak_spi_i2s_tdm_inst_t* inst )
 {
-    if( !dspic33ak_spi_i2s_tdm_inst_arm( inst ) )
+    if( !tdm_inst_arm( inst ) )
     {
         return false;
     }
-    dspic33ak_spi_i2s_tdm_inst_go( inst );
+    tdm_inst_go( inst );
     return true;
 }
 
@@ -1102,12 +1127,79 @@ void dspic33ak_spi_i2s_tdm_stop_domain( uint8_t domain )
 bool dspic33ak_spi_i2s_tdm_start_domain( uint8_t domain )
 {
     const uint8_t n = dspic33ak_spi_i2s_tdm_instance_count();
-    bool          any = false;
 
-    // (1) ARM every member. A sync domain is a phase-locked UNIT: every member must be
-    //     configured, or the whole domain fails to start. Otherwise a half-configured domain
-    //     (e.g. SPI1 configure ok but SPI2 configure failed) would start SPI1 alone and report
-    //     success -- a silent, unsynchronized partial start. Fail closed instead.
+    // open() (shared clock/pins/CLC + readiness) MUST have run first.
+    if( !s_stream.opened )
+    {
+        tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_NOT_OPEN );
+        return false;
+    }
+
+    // PREFLIGHT (zero side effects). A sync domain is a phase-locked UNIT, so re-check its
+    // INVARIANTS at START -- not only in configure_system() -- because a member may have been
+    // (re)configured via the per-leg inst_configure() path afterwards. Every member must be
+    // configured; at most ONE clock MASTER (two would fight the shared BCLK/FS); and all members
+    // must agree on the frame interpretation (same-domain framing). Running members make this
+    // NON-DESTRUCTIVE: a fully-running domain is an idempotent success; a partial/foreign running
+    // state is rejected WITHOUT tearing the domain down (a supervisor re-assert must not kill audio).
+    const tdm_spi_leg_t *ref     = NULL;
+    uint8_t              members = 0u;
+    uint8_t              masters = 0u;
+    uint8_t              running = 0u;
+    for( uint8_t i = 0u; i < n; i++ )
+    {
+        const tdm_spi_leg_t *leg = dspic33ak_spi_i2s_tdm_inst( i );
+        if( ( leg == NULL ) || ( leg->sync_domain != domain ) )
+        {
+            continue;
+        }
+        members++;
+        if( !leg->config_valid )
+        {
+            tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_NOT_CONFIGURED );
+            return false;   // no side effects (do NOT stop_domain on a preflight reject)
+        }
+        if( leg->config.clock_role == DSPIC33AK_SPI_I2S_TDM_CLOCK_MASTER )
+        {
+            masters++;
+        }
+        if( leg->running )
+        {
+            running++;
+        }
+        if( ref == NULL )
+        {
+            ref = leg;
+        }
+        else if( !tdm_domain_framing_matches( &ref->config, &leg->config ) )
+        {
+            tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_TOPOLOGY );
+            return false;
+        }
+    }
+    if( members == 0u )
+    {
+        tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_BAD_INSTANCE );
+        return false;
+    }
+    if( masters > 1u )
+    {
+        tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_TOPOLOGY );
+        return false;
+    }
+    if( running > 0u )
+    {
+        if( running == members )
+        {
+            tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_NONE );
+            return true;    // already fully up -> idempotent no-op success
+        }
+        tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_ALREADY_RUNNING );
+        return false;       // partial running -> reject, leave the domain as-is
+    }
+
+    // (1) ARM every member. Preflight guaranteed all are stopped + configured, so a failure
+    //     here only rolls back what THIS call armed (stop_domain is idempotent on stopped legs).
     for( uint8_t i = 0u; i < n; i++ )
     {
         dspic33ak_spi_i2s_tdm_inst_t* leg = dspic33ak_spi_i2s_tdm_inst( i );
@@ -1115,23 +1207,11 @@ bool dspic33ak_spi_i2s_tdm_start_domain( uint8_t domain )
         {
             continue;
         }
-        any = true;
-        if( !leg->config_valid )
+        if( !tdm_inst_arm( leg ) )
         {
-            tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_NOT_CONFIGURED );
-            dspic33ak_spi_i2s_tdm_stop_domain( domain );   // leave the domain cleanly stopped
+            dspic33ak_spi_i2s_tdm_stop_domain( domain );   // roll back only this call's arms
             return false;
         }
-        if( !dspic33ak_spi_i2s_tdm_inst_arm( leg ) )
-        {
-            dspic33ak_spi_i2s_tdm_stop_domain( domain );   // roll the whole domain back
-            return false;
-        }
-    }
-    if( !any )
-    {
-        tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_BAD_INSTANCE );
-        return false;
     }
 
     // (2a) GO the non-master legs first (adjacent SPIEN releases).
@@ -1144,7 +1224,7 @@ bool dspic33ak_spi_i2s_tdm_start_domain( uint8_t domain )
         }
         if( leg->config.clock_role != DSPIC33AK_SPI_I2S_TDM_CLOCK_MASTER )
         {
-            dspic33ak_spi_i2s_tdm_inst_go( leg );
+            tdm_inst_go( leg );
         }
     }
     // (2b) then the clock-MASTER leg(s) LAST -- its BCLK/FS starts after the slaves listen.
@@ -1157,7 +1237,7 @@ bool dspic33ak_spi_i2s_tdm_start_domain( uint8_t domain )
         }
         if( leg->config.clock_role == DSPIC33AK_SPI_I2S_TDM_CLOCK_MASTER )
         {
-            dspic33ak_spi_i2s_tdm_inst_go( leg );
+            tdm_inst_go( leg );
         }
     }
     tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_NONE );
@@ -1172,7 +1252,13 @@ bool dspic33ak_spi_i2s_tdm_start_all_domains( void )
 {
     const uint8_t n = dspic33ak_spi_i2s_tdm_instance_count();
     uint32_t      started_mask = 0u;
+    bool          started_any  = false;
 
+    if( !s_stream.opened )
+    {
+        tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_NOT_OPEN );
+        return false;
+    }
     for( uint8_t i = 0u; i < n; i++ )
     {
         dspic33ak_spi_i2s_tdm_inst_t* leg = dspic33ak_spi_i2s_tdm_inst( i );
@@ -1200,6 +1286,12 @@ bool dspic33ak_spi_i2s_tdm_start_all_domains( void )
             }
             return false;
         }
+        started_any = true;
+    }
+    if( !started_any )
+    {
+        tdm_set_error( DSPIC33AK_SPI_I2S_TDM_ERR_NOT_CONFIGURED );
+        return false;   // no configured domain to start (was: silently returned true)
     }
     return true;
 }

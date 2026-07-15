@@ -56,12 +56,16 @@
 //===========================================================
 // DMA channel allocation (single source of truth for the SPI<->DMA binding)
 //
-// Each SPI Audio instance owns one RX + one TX DMA channel. These numbers are read by
-// the HAL core both for its s_spi_legs[] table AND for its generated _DMAnInterrupt
-// vectors (the core builds the vector names from them by token-paste), so changing an
-// assignment here moves the whole chain -- leg table and vector -- together. Each is
-// -D overridable. Maintain a chip-wide map by hand: the HAL cannot see other
-// subsystems' DMA usage. Duplicate channels fail the build (redefined vector).
+// Each SPI Audio instance owns one RX + one TX DMA channel, read by the HAL core for its
+// s_spi_legs[] table. NOTE: the RX interrupt vectors are EXPLICIT C (_DMA0Interrupt /
+// _DMA2Interrupt), each bound to its RX-DMA channel by a compile-time assert -- they are NOT
+// token-paste-generated from these macros. So with DSPIC33AK_TDM_DEFINE_DMA_VECTORS=1 (default)
+// the RX-DMA channels are effectively FIXED at 0 (SPI1) / 2 (SPI2): changing e.g.
+// DSPIC33AK_TDM_SPI1_RX_DMA to 4 fails the build on the assert. To use other RX channels, set
+// DSPIC33AK_TDM_DEFINE_DMA_VECTORS=0 and provide your own _DMA<rx>Interrupt that calls
+// dspic33ak_spi_i2s_tdm_inst_rx_isr(), or edit the core's explicit vector section to match.
+// TX channels are free (interrupt-less). Each is -D overridable. Maintain a chip-wide map by
+// hand: the HAL cannot see other subsystems' DMA usage. Duplicate channels fail the build.
 //===========================================================
 #ifndef DSPIC33AK_TDM_SPI1_RX_DMA
 #define DSPIC33AK_TDM_SPI1_RX_DMA   0
@@ -113,6 +117,15 @@
 #endif
 #ifndef DSPIC33AK_TDM_SPI2_SYNC_DOMAIN
 #define DSPIC33AK_TDM_SPI2_SYNC_DOMAIN   (0)
+#endif
+
+// sync_domain must be 0..31 (start_all_domains()'s dedup/rollback mask range). The core also
+// rejects an out-of-range domain at inst_configure()/configure_system(), but catch it here too.
+#if (DSPIC33AK_TDM_SPI1_SYNC_DOMAIN >= 32)
+#error "DSPIC33AK_TDM_SPI1_SYNC_DOMAIN must be in 0..31."
+#endif
+#if DSPIC33AK_TDM_USE_SPI2 && (DSPIC33AK_TDM_SPI2_SYNC_DOMAIN >= 32)
+#error "DSPIC33AK_TDM_SPI2_SYNC_DOMAIN must be in 0..31."
 #endif
 
 

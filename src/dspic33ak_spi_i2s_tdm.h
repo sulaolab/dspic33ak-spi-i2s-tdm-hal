@@ -91,11 +91,11 @@ typedef struct
 //===========================================================
 // Runtime SPI/I2S/TDM stream configuration.
 //
-// configure() validates and stores this configuration while stopped. start()
-// applies the stored configuration to the SPI peripheral and DMA engine after the
-// platform pin/clock port hooks have completed successfully. The integrator supplies it
-// (e.g. from a board config table) or builds it directly. Field comments map to the
-// SPIxCON1 bit each one drives.
+// inst_configure() / configure_system() validate and store this configuration while stopped.
+// open() then runs the platform pin/clock port hooks; a subsequent start (inst_start /
+// start_domain / start_all_domains) applies the stored configuration to the SPI peripheral and
+// DMA engine. The integrator supplies it (e.g. from a board config table) or builds it directly.
+// Field comments map to the SPIxCON1 bit each one drives.
 //===========================================================
 
 // Frame format. Selects FRMCNT + the conventional FRMPOL used today.
@@ -217,20 +217,23 @@ typedef struct {
 // Board/clock PORT (optional hooks). The HAL core is board-free: instead of
 // calling the board adapter directly, it routes pin routing + external-clock
 // concerns through this fn-pointer table, which the platform layer
-// (audio_app) registers via set_port(). Every field is optional; the
-// fallible hooks return bool (false => start() aborts and returns false) and take
-// the resolved role so the platform can act differently for master vs slave:
+// (audio_app) registers via set_port(). ALL of these hooks are consumed by open()
+// (NOT by the start* calls). Every field is optional; the fallible hooks return bool
+// (false => open() aborts and returns false) and take the role open() derived from the
+// committed primary leg, so the platform can act differently for master vs slave:
 //   - configure_pins(role)  : PPS/GPIO routing for the role. false => unsupported
 //                             pin config (e.g. a role this board cannot drive) =>
-//                             start() fails. NULL => core does no pin routing.
+//                             open() fails. NULL => core does no pin routing.
 //   - clc_passthrough(role) : CLC bypass route (slave clock fan-out). false =>
-//                             start() fails. NULL => skipped.
+//                             open() fails. NULL => skipped.
 //   - clock_source_init(role): bring up an external (e.g. USB-audio) clock. false
-//                             => start() fails. NULL => no external clock to bring up.
+//                             => open() fails. NULL => no external clock to bring up.
 //   - clock_source_ready(role): external-clock readiness; drives is_active() and a
-//                             SINGLE non-blocking check in start() (start() does NOT
-//                             wait -- it returns false if not ready, leaving retry to
-//                             the platform/app). NULL => always ready (no clock gate).
+//                             SINGLE non-blocking check in OPEN() (open() does NOT wait --
+//                             it returns false if not ready, leaving retry to the
+//                             platform/app). The start* calls do NOT re-check readiness, so
+//                             if the clock may drop after open() gate on is_active() or
+//                             re-open(). NULL => always ready (no clock gate).
 //   - consume_clock_event() : read-and-clear the ext-clock stop/resume edge; NULL
 //                             => always NONE.
 // With NO port registered the core behaves as a self-clocked transport with no
@@ -362,9 +365,12 @@ typedef struct {
 
 // Configure ALL legs in one TRANSACTIONAL call: setups[i] targets leg index i, and
 // setup_count MUST equal the built leg count. Two passes with all-or-nothing semantics:
-//   1. PREFLIGHT (zero side effects): every leg must be stopped and its stream must pass
-//      the envelope check, and each sync domain may contain at most one clock MASTER. If
-//      ANY check fails the whole call is rejected and NOT a single leg is touched.
+//   1. PREFLIGHT (zero side effects): every leg must be stopped, its stream must pass the
+//      envelope check, its sync_domain must be < 32, each sync domain may contain at most one
+//      clock MASTER, and legs sharing a sync domain must agree on the frame interpretation
+//      (format/word_bits/slots/block/SPIFE/CKP/CKE/fs_shape). If ANY check fails the whole call
+//      is rejected and NOT a single leg is touched. (start_domain re-checks these invariants at
+//      start, so the per-leg inst_configure() path is guarded too.)
 //   2. COMMIT: only after a fully clean preflight, every leg's config + sync_domain +
 //      config_valid are stored together. There is thus no partially-configured state --
 //      never SPI1 on the new config while SPI2 keeps the old.
@@ -384,12 +390,12 @@ extern bool dspic33ak_spi_i2s_tdm_configure_system( const dspic33ak_spi_i2s_tdm_
 extern bool dspic33ak_spi_i2s_tdm_inst_get_setup( const dspic33ak_spi_i2s_tdm_inst_t* inst,
                                                   dspic33ak_spi_i2s_tdm_leg_setup_t* setup );
 extern bool dspic33ak_spi_i2s_tdm_inst_start( dspic33ak_spi_i2s_tdm_inst_t* inst );
-// Split start: arm() programs+arms DMA/SPI but leaves the module OFF; go() releases it (SPIEN
-// ON). Arm all co-clocked legs, then go() them back-to-back (slaves first, internal FS master
-// last) so their ping-pong DMAs latch the same first FS edge = phase-locked. inst_start = arm+go.
-extern bool dspic33ak_spi_i2s_tdm_inst_arm( dspic33ak_spi_i2s_tdm_inst_t* inst );
-extern void dspic33ak_spi_i2s_tdm_inst_go( dspic33ak_spi_i2s_tdm_inst_t* inst );
 extern void dspic33ak_spi_i2s_tdm_inst_stop( dspic33ak_spi_i2s_tdm_inst_t* inst );
+// NOTE: the internal arm/go split (program+arm DMA/SPI with the module OFF, then release SPIEN
+// back-to-back so co-clocked legs latch one FS edge = phase-locked) is NOT public. It has no
+// armed-state / open-gate of its own, so exposing it would let a caller enable SPI out of
+// sequence. Phase-locked co-clocked startup is delivered through start_domain() /
+// start_all_domains() (which arm then release internally); a single leg uses inst_start().
 
 // Sync-domain group start/stop. A domain = the set of legs sharing sync_domain (declared per
 // leg as DSPIC33AK_TDM_<name>_SYNC_DOMAIN). start_domain arms all members then releases SPIEN
@@ -449,12 +455,15 @@ typedef enum {
     DSPIC33AK_SPI_I2S_TDM_ERR_NOT_CONFIGURED,      // start before a successful configure
     DSPIC33AK_SPI_I2S_TDM_ERR_ALREADY_RUNNING,     // start/configure while running
     DSPIC33AK_SPI_I2S_TDM_ERR_UNSUPPORTED_CONFIG,  // configure envelope rejected (format/slots/blk)
-    DSPIC33AK_SPI_I2S_TDM_ERR_TOPOLOGY,            // instance-list/topology validation failed
+    DSPIC33AK_SPI_I2S_TDM_ERR_TOPOLOGY,            // resource/domain topology: duplicate SPI/DMA, >1
+                                                   // clock MASTER or a framing mismatch within a sync
+                                                   // domain, bad primary index, or sync_domain >= 32
     DSPIC33AK_SPI_I2S_TDM_ERR_CLOCK_INIT,          // port clock_source_init hook failed
     DSPIC33AK_SPI_I2S_TDM_ERR_CLOCK_NOT_READY,     // port clock_source_ready hook not ready
     DSPIC33AK_SPI_I2S_TDM_ERR_PIN_CONFIG,          // port configure_pins hook failed
     DSPIC33AK_SPI_I2S_TDM_ERR_CLC,                 // port clc_passthrough hook failed
     DSPIC33AK_SPI_I2S_TDM_ERR_DMA_CONFIG,          // DMA channel setup failed
+    DSPIC33AK_SPI_I2S_TDM_ERR_NOT_OPEN,            // start/arm attempted before a successful open()
 } dspic33ak_spi_i2s_tdm_error_t;
 
 extern dspic33ak_spi_i2s_tdm_error_t dspic33ak_spi_i2s_tdm_get_last_error( void );

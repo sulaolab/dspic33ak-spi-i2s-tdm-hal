@@ -5,13 +5,15 @@
 // dspic33ak_spi_i2s_tdm_diag.{c,h} = the SPI/I2S/TDM transport's DIAGNOSTICS,
 // kept deliberately SEPARATE from the transport core. It owns the per-stream
 // health counters (completed block count, deadline-miss count) and the per-ISR
-// load/time monitor, plus the only debug-build dependencies (high-res timer for
-// the load monitor, and -- under ENA_TDM_DBG -- printf + scope GPIO). The
-// transport core holds one dspic33ak_spi_i2s_tdm_diag_t per block-completion ISR
-// and updates it ONLY through the functions below; it does not read the fields
-// in the hot path. This separation keeps the transport context limited to what is
-// required to configure/start/transfer/stop, and lets each physical SPI instance
-// own an independent diag once the engine moves to per-instance ISRs.
+// load/time monitor. Its external dependencies are: the hal_timer high-res API
+// (used by the load monitor, runtime-gated via is_initialized() -- a normal
+// sibling-HAL dependency, present in every build) and, ONLY under ENA_TDM_DBG,
+// printf + scope GPIO. The transport core holds one dspic33ak_spi_i2s_tdm_diag_t
+// per block-completion ISR and updates it ONLY through the functions below; it
+// does not read the fields in the hot path. This separation keeps the transport
+// context limited to what is required to configure/start/transfer/stop, and lets
+// each physical SPI instance own an independent diag (the engine uses per-instance
+// block-completion ISRs).
 //
 // CONCURRENCY: the counters are updated from the block-completion ISR. The 32-bit
 // reads in *_get_load()/*_read_counts() are NOT atomic on this 16-bit core, so the

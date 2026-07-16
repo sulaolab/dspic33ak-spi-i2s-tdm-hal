@@ -21,38 +21,33 @@
 #endif
 
 //===========================================================
-// dspic33ak_spi_i2s_tdm.{c,h} + dspic33ak_spi_i2s_tdm_reg.h = the reusable SPI/I2S/TDM
-// transport HAL core (Perseus-derived; also published standalone as dspic33ak-spi-i2s-tdm-hal
-// and vendored into dspic33ak-hal-starter -- the same source across all three). Known
-// sibling-HAL dependencies are listed below. It does: SPI framed-mode (I2S/TDM) setup,
-// DMA + ping-pong buffers,
-// block callback, start/stop/configure/get_status, and deadline-miss + load
-// diagnostics. It is RATE-AGNOSTIC (no sample-rate state/API -- runs at the configured
-// BRG / external clock). It does NOT do DSP, codec (WM8904), PPS/CLC pins, or app config
-// -- a client registers a block callback and a board/clock port.
-//   - audio_app_board.* (audio_app/) = Perseus board-adapter EXAMPLE (not core).
-//   - audio_app.* (audio_app/)                  = Perseus demo app layer (not core).
-// Pin/CLC + external-clock concerns are reached through the registered port
-// (set_port()) -- the core no longer includes the board adapter, nor app config.
+// dspic33ak_spi_i2s_tdm.{c,h} (+ _hw.{c,h}, _diag.{c,h}, _fs_clc.{c,h}, _reg.h) = the reusable
+// SPI/I2S/TDM transport HAL core. The same source is published standalone as
+// dspic33ak-spi-i2s-tdm-hal and vendored into dspic33ak-hal-starter and the CMSIS-SAI driver.
+// It does: SPI framed-mode (I2S/TDM) setup, DMA + ping-pong buffers, block callback,
+// start/stop/configure/get_status, and deadline-miss + load diagnostics. It is RATE-AGNOSTIC
+// (no sample-rate state/API -- runs at the configured BRG / external clock). It does NOT do DSP,
+// codec setup, or app config -- a client registers a block callback and a board/clock port.
+// Pin/PPS + external-clock concerns are reached through the registered port (set_port()), with
+// ONE exception: for a TDM MASTER with a 50%-duty frame sync (fs_shape = FS_50PCT) the _fs_clc
+// unit drives CLC10 + a virtual pin (RPV8) directly to shape the FS pin; all other pin/PPS routing
+// stays in the port.
 // Compile-time stream geometry + topology come from a project-supplied
-// dspic33ak_spi_i2s_tdm_conf.h. The HAL core only depends on DSPIC33AK_TDM_* macros
-// from that header -- it does not read app symbols directly. The publishable example
-// config (conf.h_example in the HAL folder) is self-contained and app-independent.
-// The in-tree project config (src/dspic33ak_spi_i2s_tdm_conf.h) may derive
-// DSPIC33AK_TDM_* from APP_* for automatic consistency; that is the project's
-// integration choice, not the HAL's requirement. Instance COUNT is chosen by
-// DSPIC33AK_TDM_USE_SPI2 (1 or 2). The physical-SPI mapping is FIXED IN THE CORE (leg 0 =
-// SPI1, leg 1 = SPI2) -- it does NOT come from conf.h; conf.h supplies only each leg's RX/TX
-// DMA channels, geometry (SLOTS_PER_FS / BLOCK_FRAMES), and initial SYNC_DOMAIN seed. The
-// core's leg enum, buffers, leg table, and _DMA<rx>Interrupt vectors are explicit C keyed off
-// those (no generator macro). Supported-device limitation:
-// the silicon-facts paths cover __dsPIC33AK512MPS512__ / __dsPIC33AK128MC106__ only (the
-// core #error's otherwise; other parts need their facts added). Known sibling-HAL
-// dependencies: dspic33ak_dma (required), and the load monitor's use of the hal_timer
-// high-res public API (dspic33ak_high_res_timer_*, runtime-gated via is_initialized()) --
-// a clean sibling-HAL dependency, like hal_dma. The debug-only deps (<stdio.h>,
-// dspic33ak_tick_timer.h for timestamps, board_dbg_pins.h scope pins) are included only
-// under ENA_TDM_DBG, so the default (debug-off) core pulls none of them.
+// dspic33ak_spi_i2s_tdm_conf.h. The HAL core only depends on DSPIC33AK_TDM_* macros from that
+// header -- it does not read app symbols. The publishable example config (conf.h_example in the
+// HAL folder) is self-contained and app-independent; an integrator may instead supply a conf.h
+// that derives DSPIC33AK_TDM_* from its own build config (that is the integrator's choice, not the
+// HAL's requirement). Instance COUNT is chosen by DSPIC33AK_TDM_USE_SPI2 (1 or 2). The physical-SPI
+// mapping is FIXED IN THE CORE (leg 0 = SPI1, leg 1 = SPI2) -- it does NOT come from conf.h; conf.h
+// supplies only each leg's RX/TX DMA channels, geometry (SLOTS_PER_FS / BLOCK_FRAMES), and initial
+// SYNC_DOMAIN seed. The core's leg enum, buffers, leg table, and _DMA<rx>Interrupt vectors are
+// explicit C keyed off those (no generator macro). Supported-device limitation: the silicon-facts
+// paths cover __dsPIC33AK512MPS512__ / __dsPIC33AK128MC106__ only (the core #error's otherwise;
+// other parts need their facts added). Known sibling-HAL dependencies: dspic33ak_dma (required),
+// and the load monitor's use of the hal_timer high-res public API (dspic33ak_high_res_timer_*,
+// runtime-gated via is_initialized()) -- a clean sibling-HAL dependency, like hal_dma. The
+// debug-only deps (<stdio.h>, dspic33ak_tick_timer.h for timestamps, board_dbg_pins.h scope pins)
+// are included only under ENA_TDM_DBG, so the default (debug-off) core pulls none of them.
 //===========================================================
 
 //===========================================================
@@ -101,17 +96,18 @@ typedef struct
 // Field comments map to the SPIxCON1 bit each one drives.
 //===========================================================
 
-// Frame format. Selects FRMCNT + the conventional FRMPOL used today.
-//   I2S : FRMCNT=001 (FS every 2 words), FRMPOL active-low   (was ENA_FRMT_I2S)
-//   TDM : FRMCNT=011 (FS every 8 words, TDM8), FRMPOL active-high
+// Frame format. Selects FRMCNT + the conventional FRMPOL.
+//   I2S : FS every 2 slots, FRMPOL active-low.
+//   TDM : FS every slots_per_fs slots (TDM4/8/16/32; FRMCNT is derived from slots_per_fs, so it
+//         is not fixed to 8), FRMPOL active-high.
 typedef enum {
     DSPIC33AK_SPI_I2S_TDM_FORMAT_I2S = 0,
     DSPIC33AK_SPI_I2S_TDM_FORMAT_TDM = 1,
 } dspic33ak_spi_i2s_tdm_format_t;
 
 // Bit-clock / frame-sync role.
-//   SLAVE  : MSTEN=0, FRMSYNC=1 (FS input)   -- external BCLK/FS (Perseus today)
-//   MASTER : MSTEN=1, FRMSYNC=0 (FS output)  -- self-clocked (starter target)
+//   SLAVE  : MSTEN=0, FRMSYNC=1 (FS input)   -- external BCLK/FS drives the engine.
+//   MASTER : MSTEN=1, FRMSYNC=0 (FS output)  -- the engine generates BCLK/FS.
 typedef enum {
     DSPIC33AK_SPI_I2S_TDM_CLOCK_SLAVE  = 0,
     DSPIC33AK_SPI_I2S_TDM_CLOCK_MASTER = 1,
@@ -155,13 +151,12 @@ typedef struct {
     bool     ignore_underrun;                       // IGNTUR
 } dspic33ak_spi_i2s_tdm_config_t;
 
-// Clock-change event reported by the slave's external-clock detector
-// (board RB15 / CN). STOPPED = the external bit/frame clock has stopped (e.g. the
-// source is switching sample rate) -> the app should mute + stop. RESUMED = the
-// clock is back -> the app should measure the rate, reconfigure, then restart.
-// NONE = nothing pending. Consumed (read-and-clear) via
-// dspic33ak_spi_i2s_tdm_consume_clock_event(); always NONE when the board has no
-// external-clock detect (e.g. ENA_USB_AUDIO_IN undefined).
+// Clock-change event reported by the registered port's external-clock detector (if the board
+// provides one). STOPPED = the external bit/frame clock has stopped (e.g. the source is switching
+// sample rate) -> the app should mute + stop. RESUMED = the clock is back -> the app should measure
+// the rate, reconfigure, then restart. NONE = nothing pending. Consumed (read-and-clear) via
+// dspic33ak_spi_i2s_tdm_consume_clock_event(); always NONE when the port provides no external-clock
+// detector.
 typedef enum {
     DSPIC33AK_SPI_I2S_TDM_CLOCK_EVENT_NONE = 0,
     DSPIC33AK_SPI_I2S_TDM_CLOCK_EVENT_STOPPED, // external clock stopped (rate switch begun)
@@ -187,8 +182,9 @@ typedef void (*dspic33ak_spi_i2s_tdm_block_cb_t)( const int32_t* src,
                                                   int32_t*       dst,
                                                   void*          user );
 
-// Opaque per-physical-SPI instance handle. The engine exposes the two co-clocked SPI
-// legs (SPI1 + optional SPI2) through the accessors below; pass the handle to
+// Opaque per-physical-SPI instance handle. The engine exposes the SPI legs (SPI1 + optional
+// SPI2; co-clocked when they share a sync_domain, independent when they do not) through the
+// accessors below; pass the handle to
 // inst_configure()/inst_start()/inst_stop()/set_block_callback()/inst_get_status() to
 // drive or query that one instance. The shared board/clock port is brought up once via
 // open()/close(); the app owns the multi-instance ordering.
@@ -203,8 +199,8 @@ typedef struct dspic33ak_spi_i2s_tdm_inst_s dspic33ak_spi_i2s_tdm_inst_t;
 // from SPI HW FIFO over/underrun flags.
 // `running` is the true stream-running state -- set by start(), cleared by stop().
 // It is DISTINCT from `active`: `active`
-// (is_active()) is the clock/source-readiness gate (e.g. external USB audio clock
-// present) that the Perseus main loop uses to decide whether streaming *should*
+// (is_active()) is the clock/source-readiness gate (e.g. an external bit/frame clock
+// present) that a client's main loop can use to decide whether streaming *should*
 // run, and it can read true while the stream is stopped. Read `running` for "is
 // the engine actually streaming", `active` for "is the clock source ready".
 typedef struct {
@@ -299,7 +295,7 @@ extern bool dspic33ak_spi_i2s_tdm_set_port( const dspic33ak_spi_i2s_tdm_port_t* 
 // let a caller enumerate instances (for i in 0 .. instance_count()-1: inst(i)). spi1()/spi2()
 // are name-stable convenience wrappers: spi1() is the first instance; spi2() is the second,
 // or NULL when only one is built (DSPIC33AK_TDM_USE_SPI2 == 0). Use the handle with
-// set_block_callback(). (The Perseus CMSIS-SAI wrapper maps Driver_SAI0 -> spi1().)
+// set_block_callback(). (E.g. a CMSIS-SAI wrapper can map Driver_SAI0 -> spi1().)
 extern uint8_t                       dspic33ak_spi_i2s_tdm_instance_count( void );
 extern dspic33ak_spi_i2s_tdm_inst_t* dspic33ak_spi_i2s_tdm_inst( uint8_t index );
 extern dspic33ak_spi_i2s_tdm_inst_t* dspic33ak_spi_i2s_tdm_spi1( void );
@@ -307,7 +303,7 @@ extern dspic33ak_spi_i2s_tdm_inst_t* dspic33ak_spi_i2s_tdm_spi2( void );
 
 //===========================================================
 // CANDIDATE / non-generic API (co-clocked dual-codec support). The four functions below
-// exist for the Perseus single-producer co-clocked A/B path (one leg's callback fills the
+// exist for a single-producer co-clocked A/B path (one leg's callback fills the
 // other leg's TX, plus phase probes measuring SPI1/SPI2 alignment). A generic single- or
 // independent-instance consumer does NOT need them. They are NOT part of the minimal public
 // transport contract and may change or move if that minimal transport contract is narrowed or
@@ -538,7 +534,7 @@ extern dspic33ak_spi_i2s_tdm_error_t dspic33ak_spi_i2s_tdm_get_last_error( void 
 // RX-block ISR entry for one instance, for the DSPIC33AK_TDM_DEFINE_DMA_VECTORS=0
 // (vector-ownership opt-out) path: call it from your own _DMA<rx>Interrupt for that
 // instance's RX channel (TX is interrupt-less -- never call it for a TX channel). It runs
-// the same block work as the HAL's generated vector. A NULL inst is ignored. In the
+// the same block work as the HAL's own explicit vector. A NULL inst is ignored. In the
 // default turnkey build (=1) you do not call this -- the HAL's own vectors do the work.
 extern void dspic33ak_spi_i2s_tdm_inst_rx_isr( dspic33ak_spi_i2s_tdm_inst_t* inst );
 

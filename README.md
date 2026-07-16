@@ -35,14 +35,18 @@ a complete worked example.
     gets a ~50%-duty FS synthesized by **CLC10** (a J-K flip-flop toggled by a half-frame
     FRMSYNC marker, fed internally via virtual pin RPV8) on the same FS pin — no app/CLC code
     and no extra pin (the FS pin is auto-detected by PPS reverse-lookup). A TDM slave receives
-    FS as an input, so it ignores `fs_shape`. See `dspic33ak_spi_i2s_tdm_fs_clc.{c,h}`.
+    FS as an input, so `fs_shape` is accepted but has no generated-waveform effect (the value is
+    still validated and, within a sync domain, compared as a framing field). See
+    `dspic33ak_spi_i2s_tdm_fs_clc.{c,h}`.
 - Two configure/lifecycle paths (see "Configuration model" at the end):
   - **System** (recommended, multi-leg): `configure_system(setups, count)` applies ALL legs
     transactionally (all-or-nothing), then `open()` + `start_all_domains()`.
   - **Single-instance**: `inst_configure(inst, cfg)` + `open()` + `inst_start(inst)`.
   `open()` takes **no role** — it derives the clock role from the committed primary leg.
-  `inst_stop()` / `close()` tear down. Plus `get_status` / `get_load` diagnostics (block
-  count, deadline-miss, ISR load) — the arg-less ones report the primary leg.
+  Stop a SINGLE stream with `inst_stop()`, or a SYSTEM stream with `stop_domain()` /
+  `stop_all_domains()`, then `close()` to clear the shared open-state. `close()` is a near-no-op:
+  it does NOT tear down board pin routing or the external clock. Plus `get_status` / `get_load`
+  diagnostics (block count, deadline-miss, ISR load) — the arg-less ones report the primary leg.
 - Optional board/clock **port** hook (`set_port()`) for pin/CLC routing and external-clock
   bring-up/readiness — the core calls only through this registered port.
 - Multi-instance: the leg count is chosen by `DSPIC33AK_TDM_USE_SPI2` (1 or 2). The
@@ -87,7 +91,8 @@ a complete worked example.
   [dspic33ak-dma-hal](https://github.com/sulaolab/dspic33ak-dma-hal).
 - `dspic33ak_high_res_timer` — compile/link sibling dependency for the load monitor.
   Runtime use is gated by `dspic33ak_high_res_timer_is_initialized()`; if the timer is
-  not initialized, `get_load()` returns `valid=false`. Standalone repo:
+  not initialized, `get_load()` / `inst_get_load()` returns `false` and zeroes the supplied
+  load struct. Standalone repo:
   [dspic33ak-timer-hal](https://github.com/sulaolab/dspic33ak-timer-hal) (the
   Timer2 high-resolution counter).
 - The SPI register-mask helper (`dspic33ak_spi_i2s_tdm_reg.h`) ships inside this HAL folder.

@@ -202,13 +202,14 @@ static inline void  tdm_get_dest_ptr( uint32_t dma_tx_addr, int32_t* const pTxDa
 
 // Per-instance ping/pong half size (words) = slots * blk for THIS row. Both the buffer
 // size (2 * half) and the ISR's pong-half offset derive from it; passed as a compile-
-// time literal into the generated ISR bodies so the hot-path pointer math stays folded.
+// time literal into the explicit per-leg ISR bodies so the hot-path pointer math stays folded.
 #define TDM_LEG_HALF_WORDS(slots, blk)   ((slots) * (blk))
 
-// Explicit per-leg RX/TX ping-pong buffers. Each is 2*slots*blk words (Ping+Pong) using THIS
-// leg's slots/blk, so different legs may have different geometry. The names follow the leg
-// names so the leg table can wire them; same geometry macros as the leg table + ISR so the
-// three stay consistent.
+// Explicit per-leg RX/TX ping-pong buffers. Each is 2*slots*blk words (Ping+Pong). The macro takes
+// per-leg slots/blk so a future build COULD give a leg its own geometry, but this build sizes every
+// leg from the single global DSPIC33AK_TDM_SLOTS_PER_FS / _BLOCK_FRAMES. The names follow the leg
+// names so the leg table can wire them; same geometry macros as the leg table + ISR so the three
+// stay consistent.
 static int32_t    Tx_SPI1[ 2 * TDM_LEG_HALF_WORDS(DSPIC33AK_TDM_SLOTS_PER_FS, DSPIC33AK_TDM_BLOCK_FRAMES) ] __attribute__((aligned(4)));
 static int32_t    Rx_SPI1[ 2 * TDM_LEG_HALF_WORDS(DSPIC33AK_TDM_SLOTS_PER_FS, DSPIC33AK_TDM_BLOCK_FRAMES) ] __attribute__((aligned(4)));
 #if DSPIC33AK_TDM_USE_SPI2
@@ -298,7 +299,8 @@ static tdm_stream_t s_stream =
 //   SYSTEM : committed via configure_system() -> the whole-system domain API
 //            (configure_system / start_domain / start_all_domains / stop_domain /
 //            stop_all_domains) is in force.
-// configure_system() may full-recommit from ANY mode (NONE/SINGLE/SYSTEM) while stopped;
+// configure_system() may full-recommit from ANY mode (NONE/SINGLE/SYSTEM) while CLOSED (before
+// open(); an already-open engine is rejected with ERR_ALREADY_OPEN, so recommit implies stopped);
 // once SYSTEM, inst_configure() is rejected (a system caller must stay transactional).
 typedef enum {
     TDM_CONFIG_MODE_NONE = 0,
@@ -628,21 +630,33 @@ dspic33ak_spi_i2s_tdm_mirror_result_t dspic33ak_spi_i2s_tdm_inst_tx_fill_mirror(
         return DSPIC33AK_TDM_MIRROR_BAD_ARGUMENT;
     }
     *dst = NULL;   // fail-closed default: only OK sets a non-NULL pointer
-    if( ( inst == NULL ) || ( ref == NULL ) || ( ref_fill_half == NULL ) || !inst->running )
+    if( ( inst == NULL ) || ( ref == NULL ) || ( ref_fill_half == NULL ) )
+    {
+        return DSPIC33AK_TDM_MIRROR_BAD_ARGUMENT;
+    }
+    // Validate both handles are real leg objects BEFORE dereferencing them: a bogus (non-NULL,
+    // non-leg) pointer must be rejected as BAD_ARGUMENT, not dereferenced. Then require inst running.
+    if( !tdm_spi_leg_is_valid( inst ) || !tdm_spi_leg_is_valid( ref ) || !inst->running )
     {
         return DSPIC33AK_TDM_MIRROR_BAD_ARGUMENT;
     }
     const uint32_t ref_half  = (uint32_t)ref->geom_slots_per_fs  * ref->geom_block_frames;
     const uint32_t inst_half = (uint32_t)inst->geom_slots_per_fs * inst->geom_block_frames;
 
-    // Which half of ref is ref_fill_half? [base, base+ref_half) = ping (index 0); the pong
-    // half starts at base+ref_half. Reject a pointer outside ref's [base, base+2*ref_half).
-    if( ( ref_fill_half < ref->tx_buffer ) ||
-        ( ref_fill_half >= ( ref->tx_buffer + 2u * ref_half ) ) )
+    // Which half of ref is ref_fill_half? [base, base+ref_half) = ping (index 0); the pong half
+    // starts at base+ref_half. Reject a pointer outside ref's [base, base+2*ref_half). Compare in
+    // the integer domain (uintptr_t): comparing pointers into DIFFERENT array objects is undefined
+    // in C, so a bogus ref_fill_half must be range-checked as an integer -- same idiom as the inst
+    // live-DMA address check below.
+    const uintptr_t rbase = (uintptr_t)&ref->tx_buffer[ 0 ];
+    const uintptr_t rmid  = (uintptr_t)&ref->tx_buffer[ ref_half ];
+    const uintptr_t rend  = (uintptr_t)&ref->tx_buffer[ 2u * ref_half ];
+    const uintptr_t raddr = (uintptr_t)ref_fill_half;
+    if( ( raddr < rbase ) || ( raddr >= rend ) )
     {
         return DSPIC33AK_TDM_MIRROR_BAD_ARGUMENT;
     }
-    const bool     pong       = ( ref_fill_half >= ( ref->tx_buffer + ref_half ) );
+    const bool     pong       = ( raddr >= rmid );
     const uint32_t target_off = pong ? inst_half : 0u;   // words: the half we would fill
 
     // Live safety veto. With a phase-locked start the mirrored (ref-fill) half is always inst's
@@ -1513,8 +1527,11 @@ bool dspic33ak_spi_i2s_tdm_start_domain( uint8_t domain )
 }
 
 
-// Start every sync domain present in the leg table (each once). Domains are independent, so
-// order is irrelevant. SYSTEM-mode API. TWO PASSES so a later domain's failure can never tear
+// Start every sync domain present in the leg table (each once). Start/rollback bookkeeping is
+// per-domain and there is no cross-domain start-ordering constraint here (NOTE: this is NOT full
+// independence -- source-readiness is engine-wide / primary-leg-gated and shared resources such as
+// CLC10 and the board clock port are not per-domain; see tdm_stream_ready_for_start()). SYSTEM-mode
+// API. TWO PASSES so a later domain's failure can never tear
 // down a domain that was ALREADY running before this call (nor one this call did not touch):
 //   Pass 1 (side-effect-free): classify every DISTINCT domain. If ANY is PARTIAL or INVALID,
 //           reject the whole call touching NOTHING. Record which domains are STOPPED (startable).
@@ -1868,10 +1885,10 @@ void __attribute__((interrupt, context)) _DMA2Interrupt(void)
 /*
  * Public RX-block ISR entry for ONE instance (vector-ownership opt-out path).
  *
- * Runs the same block work as the HAL's own generated vector, but is a plain (non-
- * interrupt) function the integrator calls from their OWN _DMA<rx>Interrupt when
+ * Runs the same block work as the HAL's own explicit _DMA<rx>Interrupt vector, but is a plain
+ * (non-interrupt) function the integrator calls from their OWN _DMA<rx>Interrupt when
  * DSPIC33AK_TDM_DEFINE_DMA_VECTORS=0. Channels + half size come from the leg at runtime
- * (the generated turnkey vectors fold them as constants; this dispatch trades that for
+ * (the explicit turnkey vectors fold them as constants; this dispatch trades that for
  * IVT ownership). NULL inst is ignored. Call it for the instance's RX channel only --
  * TX is interrupt-less.
  */
@@ -2303,7 +2320,7 @@ static inline void tdm_rx_ie_restore( uint8_t rx_dma_ch, bool was_enabled )
  *
  * Snapshots the instance's RX DMA status, maps the just-completed RX half and the
  * writable TX half of THIS instance, then invokes THIS instance's callback with
- * (src, dst, user). Called from the generated per-instance RX vector (the
+ * (src, dst, user). Called from the explicit per-instance RX vector (the
  * _DMA<rx>Interrupt section above), which passes this instance's leg + channels.
  *
  * rx_ch / tx_ch are passed as compile-time constants from the vector so the DMA

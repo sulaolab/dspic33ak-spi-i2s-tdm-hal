@@ -214,7 +214,9 @@ they latch one frame edge (phase-locked). The arg-less `is_running()` / `get_sta
 `get_load()` report the primary leg.
 
 A small **CANDIDATE, non-generic** API supports co-clocked dual-codec use only:
-`inst_tx_fill_ptr_mirror()` and the `tx_active_half()` / `tx_active_pos()` phase probes. A
+`inst_tx_fill_mirror()` (returns a typed `mirror_result_t` —
+OK/UNSAFE_ACTIVE_HALF/UNRESOLVED_DMA_POSITION/BAD_ARGUMENT — with the writable half via an
+`int32_t** dst` out-param) and the `tx_active_half()` / `tx_active_pos()` phase probes. A
 generic single- or independent-instance consumer does not need them; they may change or move.
 
 ### Block-callback contract (summary)

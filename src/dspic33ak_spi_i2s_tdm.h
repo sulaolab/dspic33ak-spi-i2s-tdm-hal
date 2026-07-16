@@ -321,14 +321,29 @@ extern dspic33ak_spi_i2s_tdm_inst_t* dspic33ak_spi_i2s_tdm_spi2( void );
 // NULL-check before writing.
 extern int32_t* dspic33ak_spi_i2s_tdm_inst_tx_fill_ptr( dspic33ak_spi_i2s_tdm_inst_t* inst );
 
-// Mirror a reference instance's fill half onto THIS instance's TX buffer (no live-DMA read).
-// For the co-clocked single-producer dual-codec path: pass ref = the producing leg (SPI1) and
-// ref_fill_half = the `dst` its block callback received; returns the same-index (safe, not-
-// transmitting, full-block-valid) half of `inst` (SPI2). Keeps A/B sample-aligned, race-free.
-extern int32_t* dspic33ak_spi_i2s_tdm_inst_tx_fill_ptr_mirror(
+// Result of inst_tx_fill_mirror() -- lets the caller distinguish a transient "position not yet
+// resolvable" (reload boundary / just-started) from a genuine "target half is being transmitted"
+// so it can tolerate the former (skip one block, resync only if persistent) but fault on the latter.
+typedef enum {
+    DSPIC33AK_TDM_MIRROR_OK = 0,                   // *dst set to the safe (non-transmitting) target half
+    DSPIC33AK_TDM_MIRROR_UNSAFE_ACTIVE_HALF,       // target half == the half inst is transmitting NOW; *dst=NULL
+    DSPIC33AK_TDM_MIRROR_UNRESOLVED_DMA_POSITION,  // inst's live TX-DMA address is out of buffer range; *dst=NULL
+    DSPIC33AK_TDM_MIRROR_BAD_ARGUMENT,             // NULL arg / stopped inst / ref_fill_half outside ref buffer; *dst=NULL
+} dspic33ak_spi_i2s_tdm_mirror_result_t;
+
+// Mirror a reference instance's fill half onto THIS instance's TX buffer (target selected
+// DETERMINISTICALLY from ref_fill_half -- valid for the whole block; a live-DMA read is used only
+// as a secondary safety veto). For the co-clocked single-producer dual-codec path: pass ref = the
+// producing leg (SPI1) and ref_fill_half = the `dst` its block callback received; on OK, *dst = the
+// same-index (not-transmitting, full-block-valid) half of `inst` (SPI2). Returns a typed result:
+// on OK *dst is the writable half; on UNSAFE_ACTIVE_HALF / UNRESOLVED_DMA_POSITION / BAD_ARGUMENT
+// *dst is NULL and the caller must NOT write B this block (UNSAFE = fault now; UNRESOLVED = a
+// transient the caller tolerates for a few blocks then resyncs). Keeps A/B sample-aligned, race-free.
+extern dspic33ak_spi_i2s_tdm_mirror_result_t dspic33ak_spi_i2s_tdm_inst_tx_fill_mirror(
         dspic33ak_spi_i2s_tdm_inst_t*       inst,
         const dspic33ak_spi_i2s_tdm_inst_t* ref,
-        const int32_t*                      ref_fill_half );
+        const int32_t*                      ref_fill_half,
+        int32_t**                           dst );
 
 // Phase probe: which TX ping-pong half is this instance's DMA transmitting NOW?
 // 0 = ping, 1 = pong, -1 = unresolved. For measuring co-clocked SPI1/SPI2 alignment.

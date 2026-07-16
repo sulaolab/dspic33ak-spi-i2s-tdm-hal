@@ -166,8 +166,10 @@ unconfigured. `inst_get_setup(inst, &out)` reads a leg's committed setup (pure q
 for an unconfigured leg, distinct from a valid SLAVE). `start_all_domains()` starts each sync
 domain once, phase-locked (co-clocked members' `SPIEN` released back-to-back, slaves first,
 master last). The arg-less `is_running()` / `get_status()` / `get_load()` report the primary
-leg. A small **CANDIDATE, non-generic** co-clock-only API (`inst_tx_fill_ptr_mirror()`,
-`tx_active_half()` / `tx_active_pos()`) exists for dual-codec use and may change.
+leg. A small **CANDIDATE, non-generic** co-clock-only API (`inst_tx_fill_mirror()` — returns
+a typed `mirror_result_t` (OK/UNSAFE_ACTIVE_HALF/UNRESOLVED_DMA_POSITION/BAD_ARGUMENT) with the
+writable half via an `int32_t** dst` out-param; `tx_active_half()` / `tx_active_pos()`) exists
+for dual-codec use and may change.
 
 ### Block-callback contract (summary)
 

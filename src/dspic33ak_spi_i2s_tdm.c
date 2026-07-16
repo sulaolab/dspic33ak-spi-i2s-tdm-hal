@@ -444,6 +444,16 @@ bool dspic33ak_spi_i2s_tdm_is_active( void )
  * arming so a stream is not entered with the source already gone. Same gate as is_active()
  * / open(): keyed on the PRIMARY leg's role and routed through the port. A self-clocked
  * master (no port, or no clock_source_ready hook) is always ready. Returns true = go.
+ *
+ * READINESS SCOPE (by design): this gate is ENGINE-WIDE and PRIMARY-leg-gated -- it asks the
+ * port about the primary leg's clock role, NOT per-domain. A sync_domain separates only the
+ * START PHASE (which legs latch one FS edge together) and the clock topology (who is master);
+ * it does NOT carry its own source-readiness. So even a nominally "independent" master domain
+ * (e.g. an ASRC SPI2 on sync_domain 1) is gated on the primary leg's readiness here: if the
+ * primary's external clock is not ready, start_domain() on any domain returns CLOCK_NOT_READY.
+ * That matches the Perseus product policy ("no A clock -> hold the whole transport"). Per-domain
+ * source readiness is intentionally NOT supported; revisit (a per-domain readiness hook) before
+ * relying on truly independent async domains in a generic standalone reuse.
  */
 static bool tdm_stream_ready_for_start( void )
 {
@@ -600,17 +610,27 @@ int32_t* dspic33ak_spi_i2s_tdm_inst_tx_fill_ptr( dspic33ak_spi_i2s_tdm_inst_t* i
  * snapshot, A and B sample-aligned (same generation, zero skew). Restores the pre-refactor
  * single-DMA0 (src,dst_a,dst_b) behaviour on the independent-instance HAL.
  *
- * Returns NULL if inst/ref is NULL, inst is stopped, or ref_fill_half is outside ref's buffer.
- * The caller must NULL-check before writing.
+ * Returns a typed result (see the header enum). On OK, *dst = the writable (not-transmitting)
+ * target half. On BAD_ARGUMENT (NULL arg / stopped inst / ref_fill_half outside ref's buffer),
+ * UNSAFE_ACTIVE_HALF (inst is transmitting the target half NOW) or UNRESOLVED_DMA_POSITION (inst's
+ * live TX-DMA address is out of buffer range -- reload boundary / just-started / fault), *dst=NULL
+ * and the caller must NOT write B this block. The target half itself is deterministic (from
+ * ref_fill_half); the live-DMA read is only the secondary veto that produces UNSAFE/UNRESOLVED.
  */
-int32_t* dspic33ak_spi_i2s_tdm_inst_tx_fill_ptr_mirror(
+dspic33ak_spi_i2s_tdm_mirror_result_t dspic33ak_spi_i2s_tdm_inst_tx_fill_mirror(
         dspic33ak_spi_i2s_tdm_inst_t*       inst,
         const dspic33ak_spi_i2s_tdm_inst_t* ref,
-        const int32_t*                      ref_fill_half )
+        const int32_t*                      ref_fill_half,
+        int32_t**                           dst )
 {
+    if( dst == NULL )
+    {
+        return DSPIC33AK_TDM_MIRROR_BAD_ARGUMENT;
+    }
+    *dst = NULL;   // fail-closed default: only OK sets a non-NULL pointer
     if( ( inst == NULL ) || ( ref == NULL ) || ( ref_fill_half == NULL ) || !inst->running )
     {
-        return NULL;
+        return DSPIC33AK_TDM_MIRROR_BAD_ARGUMENT;
     }
     const uint32_t ref_half  = (uint32_t)ref->geom_slots_per_fs  * ref->geom_block_frames;
     const uint32_t inst_half = (uint32_t)inst->geom_slots_per_fs * inst->geom_block_frames;
@@ -620,31 +640,32 @@ int32_t* dspic33ak_spi_i2s_tdm_inst_tx_fill_ptr_mirror(
     if( ( ref_fill_half < ref->tx_buffer ) ||
         ( ref_fill_half >= ( ref->tx_buffer + 2u * ref_half ) ) )
     {
-        return NULL;
+        return DSPIC33AK_TDM_MIRROR_BAD_ARGUMENT;
     }
     const bool     pong       = ( ref_fill_half >= ( ref->tx_buffer + ref_half ) );
     const uint32_t target_off = pong ? inst_half : 0u;   // words: the half we would fill
 
-    // Live safety: refuse if inst's TX DMA is CURRENTLY transmitting the half we'd fill. With a
-    // phase-locked start the mirrored (ref-fill) half is always inst's NON-transmitting half, so
-    // this never fires; it only trips if inst is out of phase (e.g. persistently on the wrong
-    // half). Returning NULL makes the caller SKIP the cross-fill for this block (one repeated
-    // block on inst) instead of writing the half being transmitted (a tear). NOTE: sampled when
-    // this is called (block start); it does not catch inst crossing its boundary later in a long
-    // callback -- the phase-locked start prevents that, and the app's mismatch guard recovers it.
+    // Live safety veto. With a phase-locked start the mirrored (ref-fill) half is always inst's
+    // NON-transmitting half. Two abnormal cases must NOT authorize a write:
+    //   - live TX-DMA address OUT of inst's buffer (reload boundary / just-started / fault): the
+    //     active half is UNRESOLVABLE -> fail-closed as UNRESOLVED (caller tolerates a few
+    //     consecutive as a transient, resyncs only if persistent). (Was fail-OPEN before.)
+    //   - live address IN range AND on the very half we'd fill: a real phase problem -> UNSAFE.
     const uintptr_t ibase = (uintptr_t)&inst->tx_buffer[ 0 ];
     const uintptr_t imid  = (uintptr_t)&inst->tx_buffer[ inst_half ];
     const uintptr_t iend  = (uintptr_t)&inst->tx_buffer[ 2u * inst_half ];
     const uintptr_t iaddr = (uintptr_t)dspic33ak_dma_read_src( inst->tx_dma_ch );
-    if( ( iaddr >= ibase ) && ( iaddr < iend ) )
+    if( ( iaddr < ibase ) || ( iaddr >= iend ) )
     {
-        const uint32_t active_off = ( iaddr >= imid ) ? inst_half : 0u;
-        if( active_off == target_off )
-        {
-            return NULL;   // unsafe: inst is transmitting the half we'd fill -> skip this block
-        }
+        return DSPIC33AK_TDM_MIRROR_UNRESOLVED_DMA_POSITION;
     }
-    return inst->tx_buffer + target_off;
+    const uint32_t active_off = ( iaddr >= imid ) ? inst_half : 0u;
+    if( active_off == target_off )
+    {
+        return DSPIC33AK_TDM_MIRROR_UNSAFE_ACTIVE_HALF;
+    }
+    *dst = inst->tx_buffer + target_off;
+    return DSPIC33AK_TDM_MIRROR_OK;
 }
 
 

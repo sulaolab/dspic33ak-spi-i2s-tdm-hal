@@ -35,13 +35,27 @@ a complete worked example.
     gets a ~50%-duty FS synthesized by **CLC10** (a J-K flip-flop toggled by a half-frame
     FRMSYNC marker, fed internally via virtual pin RPV8) on the same FS pin — no app/CLC code
     and no extra pin (the FS pin is auto-detected by PPS reverse-lookup). A TDM slave receives
-    FS as an input, so it ignores `fs_shape`. See `dspic33ak_spi_i2s_tdm_fs_clc.{c,h}`.
-- `open` / `inst_configure` / `inst_start` / `inst_stop` / `close` lifecycle, plus
-  `get_status` / `get_load` diagnostics (block count, deadline-miss, ISR load).
+    FS as an input, so `fs_shape` is accepted but has no generated-waveform effect (the value is
+    still validated and, within a sync domain, compared as a framing field). See
+    `dspic33ak_spi_i2s_tdm_fs_clc.{c,h}`.
+- Two configure/lifecycle paths (see "Configuration model" at the end):
+  - **System** (recommended, multi-leg): `configure_system(setups, count)` applies ALL legs
+    transactionally (all-or-nothing), then `open()` + `start_all_domains()`.
+  - **Single-instance**: `inst_configure(inst, cfg)` + `open()` + `inst_start(inst)`.
+  `open()` takes **no role** — it derives the clock role from the committed primary leg.
+  Stop a SINGLE stream with `inst_stop()`, or a SYSTEM stream with `stop_domain()` /
+  `stop_all_domains()`, then `close()` to clear the shared open-state. `close()` is a near-no-op:
+  it does NOT tear down board pin routing or the external clock. Plus `get_status` / `get_load`
+  diagnostics (block count, deadline-miss, ISR load) — the arg-less ones report the primary leg.
 - Optional board/clock **port** hook (`set_port()`) for pin/CLC routing and external-clock
   bring-up/readiness — the core calls only through this registered port.
-- Multi-instance: instance count / physical-SPI / DMA channels / format / block size all
-  come from the instance list in `conf.h`. Enumerate with `instance_count()` + `inst(i)`.
+- Multi-instance: the leg count is chosen by `DSPIC33AK_TDM_USE_SPI2` (1 or 2). The
+  physical-SPI mapping is **fixed in the core** (leg 0 = SPI1, leg 1 = SPI2) -- it does NOT
+  come from `conf.h`. What `conf.h` supplies per leg is the RX/TX DMA channels, the geometry
+  (`SLOTS_PER_FS` / `BLOCK_FRAMES`), and the initial `SYNC_DOMAIN`; per-leg format / clock role
+  come from the runtime config (`configure_system` / `inst_configure`). The core defines the
+  leg enum, ping-pong buffers, leg table, and `_DMA<rx>Interrupt` vectors in **explicit C**
+  (no generator macro). Enumerate with `instance_count()` + `inst(i)`.
 
 ## 2. What this HAL does NOT do
 
@@ -62,8 +76,10 @@ a complete worked example.
 
 - The project MUST provide `dspic33ak_spi_i2s_tdm_conf.h` on the include path.
 - The HAL folder ships a self-contained template: `dspic33ak_spi_i2s_tdm_conf.h_example`.
-- Copy/rename the example (or supply an equivalent header) and edit the instance list +
-  geometry. `*.h_example` is never compiled.
+- Copy/rename the example (or supply an equivalent header) and edit the geometry
+  (`DSPIC33AK_TDM_SLOTS_PER_FS` / `_BLOCK_FRAMES`), the leg count (`DSPIC33AK_TDM_USE_SPI2`),
+  the per-instance DMA channels, and the per-leg `SYNC_DOMAIN` defaults. `*.h_example` is
+  never compiled.
 - The template is self-contained (no app-config dependency). A project MAY instead derive
   the `DSPIC33AK_TDM_*` macros from its own app config (Perseus does this in
   `src/dspic33ak_spi_i2s_tdm_conf.h`); that is the integrator's choice and does not make
@@ -75,7 +91,8 @@ a complete worked example.
   [dspic33ak-dma-hal](https://github.com/sulaolab/dspic33ak-dma-hal).
 - `dspic33ak_high_res_timer` — compile/link sibling dependency for the load monitor.
   Runtime use is gated by `dspic33ak_high_res_timer_is_initialized()`; if the timer is
-  not initialized, `get_load()` returns `valid=false`. Standalone repo:
+  not initialized, `get_load()` / `inst_get_load()` returns `false` and zeroes the supplied
+  load struct. Standalone repo:
   [dspic33ak-timer-hal](https://github.com/sulaolab/dspic33ak-timer-hal) (the
   Timer2 high-resolution counter).
 - The SPI register-mask helper (`dspic33ak_spi_i2s_tdm_reg.h`) ships inside this HAL folder.
@@ -130,6 +147,13 @@ State honestly:
     50%-duty FS) was bench-verified on a dsPIC33AK Curiosity board (BCLK/FS = 256, `miss=0`,
     plus the single-codec starter demo and the Perseus dual-codec topology). Other
     master rate/format combinations should still be confirmed on the target board.
+- This snapshot is the **system-topology** model (transactional `configure_system()`,
+  `open()` with no role, per-domain framing validation). That code is HW-verified in the
+  upstream Perseus source — co-clocked dual-codec A/B, 80-stage/94% CPU load, deterministic
+  phase-locked startup (`miss=0`), and the CMSIS-SAI single-instance loopback. The
+  standalone/starter snapshot has also been bench-verified on a dsPIC33AK Curiosity board via
+  the starter: TDM8 master smoke, `FS_PULSE` and `FS_50PCT`, stop→restart, and the
+  negative-config self-test matrix.
 
 ## 8. CMSIS-SAI relationship
 
@@ -141,6 +165,66 @@ State honestly:
 
 ---
 
+### Migration from the pre-refactor HAL
+
+This is a **breaking** API change from the earlier X-macro / `BLOCK_REF` HAL. A consumer built
+against the old API will not compile until updated; the map:
+
+| Before | Now |
+|---|---|
+| `dspic33ak_spi_i2s_tdm_role_t`, `..._ROLE_MASTER` / `..._ROLE_SLAVE` | `..._clock_role_t`, `..._CLOCK_MASTER` / `..._CLOCK_SLAVE` |
+| `config_t.role` | `config_t.clock_role` |
+| `open(role)` | `open(void)` — role derived from the committed primary leg |
+| `DSPIC33AK_TDM_INSTANCE_LIST(X)` X-macro + `BLOCK_REF` / `FOLLOWER` | explicit SPI1 / optional SPI2 in the core; leg count via `DSPIC33AK_TDM_USE_SPI2` |
+| per-leg `inst_configure()` ×N for a multi-leg stream | `configure_system(setups, count)` (transactional, all-or-nothing) |
+| public `inst_arm()` / `inst_go()` | internal only — use `inst_start()` / `start_domain()` / `start_all_domains()` |
+
+### Configuration model (summary)
+
+Two ways to configure, both ending in `open()` → start:
+
+- **System (transactional, recommended).** `configure_system(setups, count)` takes one
+  `leg_setup_t` per leg (`{ stream, sync_domain }`; `count` == the built leg count) and is
+  all-or-nothing. A side-effect-free PREFLIGHT rejects the whole call — touching no leg — if
+  any leg is running or outside the wire-format envelope, if a sync domain holds more than one
+  clock MASTER, if two legs sharing a sync domain disagree on the frame interpretation
+  (format / word_bits / slots / block_frames / SPIFE / CKP / CKE / `fs_shape`), or if any
+  `sync_domain` is ≥ 32 (the domain id range `start_all_domains()` can track). Only after a clean
+  preflight are all legs committed together, so there is never a half-configured mix.
+- **Single-instance.** `inst_configure(inst, cfg)` validates + stores one leg's config; use
+  it with `open()` + `inst_start(inst)` for a single-leg driver (e.g. a CMSIS-SAI wrapper).
+
+The two paths establish a mutually-exclusive **config-ownership mode** — a property of the
+committed configuration, independent of the open/close lifecycle (`close()` does not reset it):
+`inst_configure()` → **SINGLE**, in which the per-leg API (`inst_configure`/`inst_start`/
+`inst_stop`) is legal only on the **primary** leg; `configure_system()` → **SYSTEM**, in which the
+whole-system domain API (`configure_system`/`start_domain`/`start_all_domains`/`stop_domain`/
+`stop_all_domains`) is legal. A call from the wrong family (or a non-primary leg via `inst_*`)
+returns `ERR_CONFIG_MODE`. The latch is one-way in practice: `configure_system()` may full-recommit
+from any stopped+closed mode (SINGLE→SYSTEM ok), but there is no runtime SYSTEM→SINGLE reset — a
+compile-time-fixed integration never needs one, and switching a running product from the domain API
+to a single-leg SAI driver takes a power cycle.
+`open()` is idempotent (a second call re-runs no hooks); `close()` and `set_port()` return `bool`
+and reject while a leg is running (or, for `set_port()`, while open). The start paths re-check the
+clock-readiness gate immediately before arming, so a source that drops between `open()` and start
+fails the start (`ERR_CLOCK_NOT_READY`).
+
+`open()` takes no role: it derives the clock role from the committed **primary** leg
+(`primary_leg_index`, default leg 0) and passes it to the port hooks; it fails
+(`ERR_NOT_CONFIGURED`) if the primary is unconfigured. A board port hook that also routes a
+secondary leg reads that leg's committed role via `inst_get_setup(inst, &out)` (a pure query;
+returns `false` for an unconfigured leg — distinct from a valid SLAVE, role value 0 — so the
+hook can skip a leg not part of this run). `start_all_domains()` starts each sync domain once,
+releasing the co-clocked members' `SPIEN` back-to-back (slaves first, clock master last) so
+they latch one frame edge (phase-locked). The arg-less `is_running()` / `get_status()` /
+`get_load()` report the primary leg.
+
+A small **CANDIDATE, non-generic** API supports co-clocked dual-codec use only:
+`inst_tx_fill_mirror()` (returns a typed `mirror_result_t` —
+OK/UNSAFE_ACTIVE_HALF/UNRESOLVED_DMA_POSITION/BAD_ARGUMENT — with the writable half via an
+`int32_t** dst` out-param) and the `tx_active_half()` / `tx_active_pos()` phase probes. A
+generic single- or independent-instance consumer does not need them; they may change or move.
+
 ### Block-callback contract (summary)
 
 Register the callback with `set_block_callback()` **before** `inst_start()`; do not
@@ -151,7 +235,9 @@ instance runs no DSP path (its zeroed TX half stays silent).
 
 ### Diagnosing a failed call
 
-`open()` / `inst_configure()` / `inst_start()` return `bool`. On `false`,
-`dspic33ak_spi_i2s_tdm_get_last_error()` returns the most specific reason
+The bool-returning calls — `set_port()`, `open()`, `close()`, `inst_configure()`,
+`configure_system()`, `inst_start()`, `inst_stop()`, `start_domain()`, `start_all_domains()`,
+`stop_domain()`, `stop_all_domains()`, `set_block_callback()` — collapse several causes into one
+`false`. On `false`, `dspic33ak_spi_i2s_tdm_get_last_error()` returns the most specific reason
 (`dspic33ak_spi_i2s_tdm_error_t`). This is a debug aid only — stream health (deadline
 misses, block counts) lives in `get_status()`, not here.

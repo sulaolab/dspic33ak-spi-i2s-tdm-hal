@@ -38,7 +38,7 @@
 // (Sample rate is NOT a setting here -- the transport is rate-agnostic; the product's
 // supported-rate policy lives in the app layer, not the HAL.)
 // The core's static DMA ping-pong buffers are sized 2 * SLOTS_PER_FS *
-// BLOCK_FRAMES, and configure() rejects a config_t whose slots_per_fs /
+// BLOCK_FRAMES, and inst_configure() / configure_system() reject a config_t whose slots_per_fs /
 // block_frames do not match these compile-time values.
 //===========================================================
 
@@ -56,12 +56,19 @@
 //===========================================================
 // DMA channel allocation (single source of truth for the SPI<->DMA binding)
 //
-// Each SPI Audio instance owns one RX + one TX DMA channel. These numbers are read by
-// the HAL core both for its s_spi_legs[] table AND for its generated _DMAnInterrupt
-// vectors (the core builds the vector names from them by token-paste), so changing an
-// assignment here moves the whole chain -- leg table and vector -- together. Each is
-// -D overridable. Maintain a chip-wide map by hand: the HAL cannot see other
-// subsystems' DMA usage. Duplicate channels fail the build (redefined vector).
+// Each SPI Audio instance owns one RX + one TX DMA channel, read by the HAL core for its
+// s_spi_legs[] table. NOTE: the RX interrupt vectors are EXPLICIT C (_DMA0Interrupt /
+// _DMA2Interrupt), each bound to its RX-DMA channel by a compile-time assert -- they are NOT
+// token-paste-generated from these macros. So with DSPIC33AK_TDM_DEFINE_DMA_VECTORS=1 (default)
+// the RX-DMA channels are effectively FIXED at 0 (SPI1) / 2 (SPI2): changing e.g.
+// DSPIC33AK_TDM_SPI1_RX_DMA to 4 fails the build on the assert. To use other RX channels, set
+// DSPIC33AK_TDM_DEFINE_DMA_VECTORS=0 and provide your own _DMA<rx>Interrupt that calls
+// dspic33ak_spi_i2s_tdm_inst_rx_isr(), or edit the core's explicit vector section to match.
+// TX channels are free (interrupt-less). Each is -D overridable. Maintain a chip-wide map by
+// hand: the HAL cannot see other subsystems' DMA usage. Assignment errors are caught in two
+// places: an RX-DMA channel that no longer matches its explicit vector fails the build on the
+// _Static_assert; a duplicate channel (RX==TX on a leg, or a channel shared across legs) is
+// rejected at runtime by the topology validation (ERR_TOPOLOGY) before open()/start().
 //===========================================================
 #ifndef DSPIC33AK_TDM_SPI1_RX_DMA
 #define DSPIC33AK_TDM_SPI1_RX_DMA   0
@@ -90,27 +97,43 @@
 
 
 //===========================================================
-// Instance descriptor list -- SINGLE SOURCE for instance count + assignment.
+// Instance count + physical assignment.
 //
-//   X( leg-name, phys-SPI, RX-DMA, TX-DMA, role, slots, blk )
-// The FIRST row is the block-timing REFERENCE (BLOCK_REF -- its RX-block ISR defines the
-// block boundary and is what is_running()/the singleton get_status() report); the rest
-// are FOLLOWERs. BLOCK_REF is NOT a clock master; the clock role (master/slave) is
-// separate and per-instance (config_t.role).
-// slots/blk are PER INSTANCE (each leg's Rx_<name>/Tx_<name> is sized 2*slots*blk), so
-// different legs may run different framing/block sizes. The core generates the leg enum,
-// per-instance buffers, the s_spi_legs[] table, and the per-instance _DMAnInterrupt
-// vectors from this list -- adding an instance = add a row (a free SPI + two free DMA
-// channels).
+// The transport core defines its leg enum, per-instance ping-pong buffers, the
+// s_spi_legs[] table, and the explicit _DMA<rx>Interrupt vectors directly in C, keyed off
+// the per-instance channel #defines above (DSPIC33AK_TDM_SPIn_RX/TX_DMA) and the stream
+// geometry (DSPIC33AK_TDM_SLOTS_PER_FS / _BLOCK_FRAMES). The number of legs is chosen by
+// DSPIC33AK_TDM_USE_SPI2 (1 or 2 SPI audio transports). Adding a further physical SPI leg
+// is a source edit in the core (enum value + buffer pair + s_spi_legs[] row +
+// _DMA<rx>Interrupt vector) plus its channel #defines above -- there is no macro row list.
+// The per-leg clock role / stream shape are set at runtime by the integrator's config
+// (dspic33ak_spi_i2s_tdm_inst_configure() / _configure_system()), not here.
 //===========================================================
-#if DSPIC33AK_TDM_USE_SPI2
-#define DSPIC33AK_TDM_INSTANCE_LIST(X)                                                                                              \
-    X( SPI1, TDM_SPI1, DSPIC33AK_TDM_SPI1_RX_DMA, DSPIC33AK_TDM_SPI1_TX_DMA, BLOCK_REF, DSPIC33AK_TDM_SLOTS_PER_FS, DSPIC33AK_TDM_BLOCK_FRAMES ) \
-    X( SPI2, TDM_SPI2, DSPIC33AK_TDM_SPI2_RX_DMA, DSPIC33AK_TDM_SPI2_TX_DMA, FOLLOWER, DSPIC33AK_TDM_SLOTS_PER_FS, DSPIC33AK_TDM_BLOCK_FRAMES )
-#else
-#define DSPIC33AK_TDM_INSTANCE_LIST(X)                                                                                              \
-    X( SPI1, TDM_SPI1, DSPIC33AK_TDM_SPI1_RX_DMA, DSPIC33AK_TDM_SPI1_TX_DMA, BLOCK_REF, DSPIC33AK_TDM_SLOTS_PER_FS, DSPIC33AK_TDM_BLOCK_FRAMES )
-#endif // DSPIC33AK_TDM_USE_SPI2
+
+// Per-leg SYNC DOMAIN id: the s_spi_legs[] default (a caller using configure_system() may
+// override it per leg at runtime). Legs sharing a domain are co-clocked and started phase-locked
+// as a group; legs in different domains are started/rolled-back separately and are NOT required to
+// share BCLK/FS. NOTE: a sync_domain separates topology validation and start phase only -- it does
+// NOT provide independent source-readiness (the readiness gate is engine-wide / primary-leg-gated)
+// and domains may still contend for shared resources such as CLC10 and the board clock port. NOT
+// the clock role (config_t.clock_role). Default: one co-clocked group (domain 0); give a separate
+// leg its own id (1, 2, ...) and add the matching DSPIC33AK_TDM_<name>_SYNC_DOMAIN.
+#ifndef DSPIC33AK_TDM_SPI1_SYNC_DOMAIN
+#define DSPIC33AK_TDM_SPI1_SYNC_DOMAIN   (0)
+#endif
+#ifndef DSPIC33AK_TDM_SPI2_SYNC_DOMAIN
+#define DSPIC33AK_TDM_SPI2_SYNC_DOMAIN   (0)
+#endif
+
+// sync_domain must be 0..31 (start_all_domains()'s dedup/rollback mask range). The core also
+// rejects an out-of-range domain at inst_configure()/configure_system(), but catch it here too.
+// Reject negatives as well as >=32: a negative literal would cast to a large uint8_t at runtime.
+#if ((DSPIC33AK_TDM_SPI1_SYNC_DOMAIN) < 0) || ((DSPIC33AK_TDM_SPI1_SYNC_DOMAIN) >= 32)
+#error "DSPIC33AK_TDM_SPI1_SYNC_DOMAIN must be in 0..31."
+#endif
+#if DSPIC33AK_TDM_USE_SPI2 && (((DSPIC33AK_TDM_SPI2_SYNC_DOMAIN) < 0) || ((DSPIC33AK_TDM_SPI2_SYNC_DOMAIN) >= 32))
+#error "DSPIC33AK_TDM_SPI2_SYNC_DOMAIN must be in 0..31."
+#endif
 
 
 #if (DSPIC33AK_TDM_SLOTS_PER_FS <= 0)

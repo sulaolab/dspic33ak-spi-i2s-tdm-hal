@@ -880,9 +880,9 @@ bool dspic33ak_spi_i2s_tdm_close( void )
 }
 
 
-// The board-specific config lives in the platform layer (e.g. the Perseus board system
-// table in audio_app/audio_app_board_tdm_config.c). The core no longer fabricates a config
-// from app macros; callers configure()/configure_system() explicitly.
+// The board-specific config lives in the integrator's board/platform layer (a board TDM-config
+// table). The core no longer fabricates a config from build macros; callers supply it explicitly
+// via inst_configure() / configure_system().
 
 
 /*

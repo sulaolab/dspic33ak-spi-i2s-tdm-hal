@@ -125,7 +125,8 @@ State honestly:
 - This snapshot is the **system-topology** model (transactional `configure_system()`,
   `open()` with no role, per-domain framing validation), HW-verified in the upstream Perseus
   source (co-clocked A/B, 94% load, deterministic phase-locked startup, CMSIS single-instance
-  loopback). A fresh on-board smoke of this standalone/starter snapshot is the remaining step.
+  loopback) and bench-verified via the starter on a dsPIC33AK Curiosity board (TDM8 master
+  smoke, `FS_PULSE`/`FS_50PCT`, stop→restart, negative-config self-test matrix).
 
 ## 8. CMSIS-SAI relationship
 

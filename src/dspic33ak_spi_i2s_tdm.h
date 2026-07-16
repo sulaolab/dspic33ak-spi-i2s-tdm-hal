@@ -137,7 +137,7 @@ typedef enum {
 typedef struct {
     dspic33ak_spi_i2s_tdm_format_t format;          // I2S vs TDM (FRMCNT/FRMPOL)
     dspic33ak_spi_i2s_tdm_clock_role_t   clock_role;      // master vs slave (MSTEN/FRMSYNC)
-    uint8_t  slots_per_fs;                          // DSPIC33AK_TDM_SLOTS_PER_FS: I2S=2 / TDM8=8
+    uint8_t  slots_per_fs;                          // DSPIC33AK_TDM_SLOTS_PER_FS: I2S=2 / TDM=4,8,16,32
     uint8_t  word_bits;                             // 32 (MODE32); only 32 validated
     dspic33ak_spi_i2s_tdm_fs_shape_t fs_shape;      // FS waveform intent (see enum). HAL derives
                                                     // FRMSYPW/FRMCNT and engages CLC10 as needed.
@@ -183,8 +183,10 @@ typedef void (*dspic33ak_spi_i2s_tdm_block_cb_t)( const int32_t* src,
                                                   void*          user );
 
 // Opaque per-physical-SPI instance handle. The engine exposes the SPI legs (SPI1 + optional
-// SPI2; co-clocked when they share a sync_domain, independent when they do not) through the
-// accessors below; pass the handle to
+// SPI2; legs sharing a sync_domain are co-clocked and started phase-locked as a group, legs in
+// different domains are started/rolled-back separately and need not share BCLK/FS -- but this is
+// NOT full independence: source-readiness is engine-wide/primary-gated and some board resources
+// (CLC10, the clock port) are shared) through the accessors below; pass the handle to
 // inst_configure()/inst_start()/inst_stop()/set_block_callback()/inst_get_status() to
 // drive or query that one instance. The shared board/clock port is brought up once via
 // open()/close(); the app owns the multi-instance ordering.
@@ -215,8 +217,8 @@ typedef struct {
 //===========================================================
 // Board/clock PORT (optional hooks). The HAL core is board-free: instead of
 // calling the board adapter directly, it routes pin routing + external-clock
-// concerns through this fn-pointer table, which the platform layer
-// (audio_app) registers via set_port(). Most of these hooks are consumed by open();
+// concerns through this fn-pointer table, which the integrator's board/platform layer
+// registers via set_port(). Most of these hooks are consumed by open();
 // clock_source_ready() is ALSO re-checked by the start paths (inst_start/start_domain/
 // start_all_domains) immediately before arming. Every field is optional; the fallible hooks return bool
 // (false => open() aborts and returns false) and take the role open() derived from the
@@ -397,7 +399,7 @@ extern bool dspic33ak_spi_i2s_tdm_inst_configure( dspic33ak_spi_i2s_tdm_inst_t* 
 // sync domain is no longer taken only from the compile-time conf.h macro).
 typedef struct {
     dspic33ak_spi_i2s_tdm_config_t stream;        // full per-leg transport config
-    uint8_t                        sync_domain;   // co-clocked legs share an id; async legs differ
+    uint8_t                        sync_domain;   // co-clocked legs share an id; non-co-clocked legs use different ids
 } dspic33ak_spi_i2s_tdm_leg_setup_t;
 
 // Configure ALL legs in one TRANSACTIONAL call: setups[i] targets leg index i, and

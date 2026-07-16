@@ -150,9 +150,10 @@ State honestly:
 - This snapshot is the **system-topology** model (transactional `configure_system()`,
   `open()` with no role, per-domain framing validation). That code is HW-verified in the
   upstream Perseus source — co-clocked dual-codec A/B, 80-stage/94% CPU load, deterministic
-  phase-locked startup (`miss=0`), and the CMSIS-SAI single-instance loopback. A fresh
-  on-board smoke of THIS standalone/starter snapshot (TDM8 / `FS_PULSE` / `FS_50PCT` /
-  stop→restart + the negative-config matrix) is the remaining verification step.
+  phase-locked startup (`miss=0`), and the CMSIS-SAI single-instance loopback. The
+  standalone/starter snapshot has also been bench-verified on a dsPIC33AK Curiosity board via
+  the starter: TDM8 master smoke, `FS_PULSE` and `FS_50PCT`, stop→restart, and the
+  negative-config self-test matrix.
 
 ## 8. CMSIS-SAI relationship
 

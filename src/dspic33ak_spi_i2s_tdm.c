@@ -187,8 +187,6 @@ static inline void  tdm_get_src_ptr( uint32_t        dma_stat,
                                        uint32_t        half_pos,
                                        const int32_t** src_pptr );
 static inline void  tdm_get_dest_ptr( uint32_t dma_tx_addr, int32_t* const pTxDat, uint32_t half_pos, int32_t** dest_pptr );
-// local_copy_to_CODEC / local_drc_df2t_path / local_filter_cascade_chm were
-// moved to audio_app.c. The latter two are declared in audio_app.h.
 
 
 
@@ -217,15 +215,8 @@ static int32_t    Tx_SPI2[ 2 * TDM_LEG_HALF_WORDS(DSPIC33AK_TDM_SLOTS_PER_FS, DS
 static int32_t    Rx_SPI2[ 2 * TDM_LEG_HALF_WORDS(DSPIC33AK_TDM_SLOTS_PER_FS, DSPIC33AK_TDM_BLOCK_FRAMES) ] __attribute__((aligned(4)));
 #endif
 
-// the application DSP float work buffers (f_A_Data, f_A_Data_chm,
-// f_B_Data_chm) live in the demo app (audio_app.c), which owns AND
-// clears them (before start()). The HAL core only owns/clears its DMA ping-pong
-// buffers (the generated Rx_<name>/Tx_<name> pair per instance).
-
-
-
-
-// RB15 / USB audio clock state and ISR moved to audio_app_board.c.
+// Application processing buffers are outside the HAL's ownership. The HAL core owns and clears
+// only its RX/TX DMA ping-pong buffers (the Rx_<name>/Tx_<name> pair per leg above).
 
 
 //===========================================================
@@ -489,7 +480,7 @@ dspic33ak_spi_i2s_tdm_clock_event_t dspic33ak_spi_i2s_tdm_consume_clock_event( v
     const tdm_stream_t *stream = &s_stream;
 
     // Routed through the clock port. No port (or no hook) => NONE (no external
-    // clock to detect). The Perseus platform wires this to the board's RB15/CN edge.
+    // clock to detect). A board port typically wires this to an external-clock edge detector.
     if( ( stream->port != NULL ) && ( stream->port->consume_clock_event != NULL ) )
     {
         return stream->port->consume_clock_event();
@@ -634,8 +625,10 @@ dspic33ak_spi_i2s_tdm_mirror_result_t dspic33ak_spi_i2s_tdm_inst_tx_fill_mirror(
     {
         return DSPIC33AK_TDM_MIRROR_BAD_ARGUMENT;
     }
-    // Validate both handles are real leg objects BEFORE dereferencing them: a bogus (non-NULL,
-    // non-leg) pointer must be rejected as BAD_ARGUMENT, not dereferenced. Then require inst running.
+    // inst and ref must be handles returned by this HAL's accessors (spi1()/spi2()/inst(i)).
+    // tdm_spi_leg_is_valid() checks each descriptor's local invariants (known SPI instance,
+    // distinct RX/TX channels, non-NULL buffers) before use; it is not a defense against an
+    // arbitrary bogus pointer. Reject on that check or a stopped inst as BAD_ARGUMENT.
     if( !tdm_spi_leg_is_valid( inst ) || !tdm_spi_leg_is_valid( ref ) || !inst->running )
     {
         return DSPIC33AK_TDM_MIRROR_BAD_ARGUMENT;
@@ -1910,8 +1903,8 @@ void dspic33ak_spi_i2s_tdm_inst_rx_isr( dspic33ak_spi_i2s_tdm_inst_t* inst )
 /*
  * Clear one instance's DMA ping-pong buffers (RX + TX).
  *
- * This covers transport buffers only. Application DSP work buffers live in
- * audio_app.c and are deliberately outside the HAL's ownership boundary.
+ * This covers transport buffers only. Application processing buffers are deliberately
+ * outside the HAL's ownership boundary.
  */
 static void tdm_inst_clear_buffers( const tdm_spi_leg_t *leg )
 {
@@ -2377,9 +2370,7 @@ static inline void tdm_rx_block( tdm_spi_leg_t* inst, uint8_t rx_ch, uint8_t tx_
 }
 
 
-// The demo/application audio path (local_copy_to_CODEC,
-// local_drc_df2t_path, local_filter_cascade_chm) and the optional PWM audio
-// output live in the demo app (audio_app.c). The HAL core does NOT
-// call them: each instance's RX-block handler delivers its block to the registered
-// block callback only (no app fallback). The HAL core owns the DMA ping-pong buffers;
-// the demo app owns its f_*_Data DSP work buffers.
+// The application audio/DSP path lives above the HAL. The HAL core does NOT call any
+// application function: each instance's RX-block handler delivers its block to the registered
+// block callback only (no app fallback). The HAL core owns its DMA ping-pong buffers; the
+// application owns its own processing buffers.

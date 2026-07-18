@@ -74,9 +74,9 @@ a complete worked example.
   release is left to the integrator (a future optional port deinit hook, not included).
 - No CMSIS-SAI types in the core — `ARM_SAI_*` must not appear here.
 - No automatic recovery from SPI framed-transport health-flag events (`SPIROV` / `SPITUR` /
-  `FRMERR`) — the HAL only counts occurrences (see "SPI framed-transport health diagnostics"
-  below); deciding how to react (log, mute, restart the stream, ignore) is an app-layer policy
-  decision.
+  `FRMERR`) — the HAL only records per-RX-block observations (see "SPI framed-transport health
+  diagnostics" below); deciding how to react (log, mute, restart the stream, ignore) is an
+  app-layer policy decision.
 
 ## 3. Required project config
 
@@ -135,8 +135,8 @@ The vendor part macro is confined to one `DSPIC33AK_SPI_I2S_TDM_DEVICE` adapter
 - **Sticky-flag ownership contract.** Calling this function is how the HAL takes ownership of
   the two software-clearable bits it finds set: `SPIROV` and `FRMERR` (R/C/HS — cleared here via
   a W0C-safe write of only the software-clearable mask with the observed bits zeroed, never a
-  replay of the whole status word, so a flag hardware sets between the read and the write is
-  never lost). After this call, any other code that reads the raw `SPIxSTAT` register will see
+  replay of the whole status word, so a previously unobserved clearable bit asserted after the
+  snapshot is preserved). After this call, any other code that reads the raw `SPIxSTAT` register will see
   those two bits already acked — there is exactly one ack point per instance, inside the
   RX-block ISR path. `SPITUR` (R/HSC) is never software-clearable — hardware self-clears it only
   on `SPIEN=0` — so it is only ever *observed*, and callers always see its live state either way.

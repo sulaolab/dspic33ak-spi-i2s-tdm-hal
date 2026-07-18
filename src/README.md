@@ -53,8 +53,8 @@ needs.
   release is left to the integrator (a future optional port deinit hook, not included).
 - No CMSIS-SAI types in the core — `ARM_SAI_*` must not appear here.
 - No automatic recovery from SPI framed-transport health-flag events (`SPIROV` / `SPITUR` /
-  `FRMERR`) — the HAL only counts occurrences (see "SPI framed-transport health diagnostics"
-  below); reacting to them is an app-layer policy decision.
+  `FRMERR`) — the HAL only records per-RX-block observations (see "SPI framed-transport health
+  diagnostics" below); reacting to them is an app-layer policy decision.
 
 ## 3. Required project config
 
@@ -107,8 +107,8 @@ The vendor part macro is confined to one `DSPIC33AK_SPI_I2S_TDM_DEVICE` adapter
 `dspic33ak_spi_i2s_tdm_hw_sample_ack_errflags(inst)` samples `SPIxSTAT` once per completed RX
 block (`SPIROV | SPITUR | FRMERR`) and is the HAL's single ack point for the two
 software-clearable bits, `SPIROV`/`FRMERR` (a W0C-safe write of only the software-clearable mask
-with the observed bits zeroed — never a replay of the whole status word, so a flag hardware sets
-between the read and the write is never lost). `SPITUR` self-clears only in hardware
+with the observed bits zeroed — never a replay of the whole status word, so a previously
+unobserved clearable bit asserted after the snapshot is preserved). `SPITUR` self-clears only in hardware
 (`SPIEN=0`), so it is only ever observed. `dspic33ak_spi_i2s_tdm_diag_note_errflags()` folds the
 mask into four per-instance, per-RX-block counters read via `get_status()`:
 `err_rov_block_count` / `err_tur_block_count` / `err_frm_block_count` /

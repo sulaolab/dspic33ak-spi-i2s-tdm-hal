@@ -49,6 +49,8 @@ a complete worked example.
   diagnostics (block count, deadline-miss, ISR load) — the arg-less ones report the primary leg.
 - Optional board/clock **port** hook (`set_port()`) for pin/CLC routing and external-clock
   bring-up/readiness — the core calls only through this registered port.
+- Per-instance SPI framed-transport health diagnostics (`SPIROV` / `SPITUR` / `FRMERR`, sampled
+  once per completed RX block) — see "SPI framed-transport health diagnostics" below.
 - Multi-instance: the leg count is chosen by `DSPIC33AK_TDM_USE_SPI2` (1 or 2). The
   physical-SPI mapping is **fixed in the core** (leg 0 = SPI1, leg 1 = SPI2) -- it does NOT
   come from `conf.h`. What `conf.h` supplies per leg is the RX/TX DMA channels, the geometry
@@ -71,6 +73,10 @@ a complete worked example.
 - No failsafe / board-specific teardown in the core — `close()` is a near-no-op; pin/clock
   release is left to the integrator (a future optional port deinit hook, not included).
 - No CMSIS-SAI types in the core — `ARM_SAI_*` must not appear here.
+- No automatic recovery from SPI framed-transport health-flag events (`SPIROV` / `SPITUR` /
+  `FRMERR`) — the HAL only counts occurrences (see "SPI framed-transport health diagnostics"
+  below); deciding how to react (log, mute, restart the stream, ignore) is an app-layer policy
+  decision.
 
 ## 3. Required project config
 
@@ -114,14 +120,40 @@ The HAL `#error`s on any other device. Adding a new dsPIC33AK part means adding 
 silicon facts in the HW layer (`dspic33ak_spi_i2s_tdm_hw.{c,h}`):
 
 - SPI instance count
-- `SPIxBUF` / `SPIxCON1` / `SPIxBRG` / `SPIxIMSK` pointers
+- `SPIxBUF` / `SPIxCON1` / `SPIxBRG` / `SPIxIMSK` / `SPIxSTAT` pointers
 - DMA trigger CHSEL values
 - CPU IRQ `IEC`/`IFS` masks
 
 The vendor part macro is confined to one `DSPIC33AK_SPI_I2S_TDM_DEVICE` adapter
 (opaque-tag derivation); app/HW code selects on that, not on the raw `__dsPIC33AK*__`.
 
-## 6. Interrupt ownership
+## 6. SPI framed-transport health diagnostics
+
+- `dspic33ak_spi_i2s_tdm_hw_sample_ack_errflags(inst)` samples `SPIxSTAT` once per completed
+  RX block and returns the observed `SPIROV | SPITUR | FRMERR` mask (all three bits, as read,
+  before any clear).
+- **Sticky-flag ownership contract.** Calling this function is how the HAL takes ownership of
+  the two software-clearable bits it finds set: `SPIROV` and `FRMERR` (R/C/HS — cleared here via
+  a W0C-safe write of only the software-clearable mask with the observed bits zeroed, never a
+  replay of the whole status word, so a flag hardware sets between the read and the write is
+  never lost). After this call, any other code that reads the raw `SPIxSTAT` register will see
+  those two bits already acked — there is exactly one ack point per instance, inside the
+  RX-block ISR path. `SPITUR` (R/HSC) is never software-clearable — hardware self-clears it only
+  on `SPIEN=0` — so it is only ever *observed*, and callers always see its live state either way.
+- `dspic33ak_spi_i2s_tdm_diag_note_errflags()` folds that mask into four per-instance counters,
+  read back via `get_status()` / `inst_get_status()`:
+  - `err_rov_block_count` — RX blocks in which `SPIROV` (receive-buffer overrun) was observed.
+  - `err_tur_block_count` — RX blocks in which `SPITUR` (transmit underrun) was observed set.
+  - `err_frm_block_count` — RX blocks in which `FRMERR` (frame-sync error) was observed.
+  - `frmerr_consecutive_blocks` — length of the current run of consecutive blocks with `FRMERR`
+    observed; reset to 0 the moment a block completes without it.
+  - Each counter counts **RX blocks**, not raw hardware events: a flag that stays set across
+    several blocks (e.g. a persistent underrun) increments its counter once per block, not once
+    per underlying SPI event.
+- **No automatic recovery policy.** The HAL only counts and reports these flags — it does not
+  reset the peripheral, retry, or otherwise react to them; see "What this HAL does NOT do".
+
+## 7. Interrupt ownership
 
 - `DSPIC33AK_TDM_DEFINE_DMA_VECTORS=1` (default): the HAL defines the RX DMA interrupt
   vectors itself (turnkey). Nothing else to wire.
@@ -131,7 +163,7 @@ The vendor part macro is confined to one `DSPIC33AK_SPI_I2S_TDM_DEVICE` adapter
 
 TX is interrupt-less (no TX interrupt is enabled by the transport).
 
-## 7. Tested envelope
+## 8. Tested envelope
 
 State honestly:
 
@@ -155,7 +187,7 @@ State honestly:
   the starter: TDM8 master smoke, `FS_PULSE` and `FS_50PCT`, stop→restart, and the
   negative-config self-test matrix.
 
-## 8. CMSIS-SAI relationship
+## 9. CMSIS-SAI relationship
 
 - A CMSIS-SAI wrapper is a layer **above** this HAL, not part of it.
 - `ARM_SAI_*` types must not appear in this HAL core.
@@ -164,7 +196,14 @@ State honestly:
 - This HAL's native diagnostics use `block_deadline_miss_count`, `block_count`, `load`, and the
   framed-transport health counters `err_rov_block_count` / `err_tur_block_count` /
   `err_frm_block_count` / `frmerr_consecutive_blocks` (SPIROV/SPITUR/FRMERR, sampled once per
-  RX-block; see `get_status()`).
+  RX-block; see "SPI framed-transport health diagnostics" above).
+- **Naming note — do not confuse the two layers' event names.** This HAL's
+  `err_rov_block_count` / `err_tur_block_count` count the SPI **hardware** flags `SPIROV` /
+  `SPITUR`, sampled once per RX block at the transport layer. The CMSIS wrapper's
+  `rx_overflow` / `tx_underflow` are its **own** software buffer-semantics events, raised by the
+  wrapper's Send/Receive bookkeeping one layer up. The names read alike but the two pairs detect
+  different failure modes at different layers — a project using both should not assume one
+  implies the other.
 
 ---
 

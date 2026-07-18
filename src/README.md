@@ -30,6 +30,8 @@ needs.
   diagnostics (block count, deadline-miss, ISR load; the arg-less ones report the primary leg).
 - Optional board/clock **port** hook (`set_port()`) for pin/CLC routing and external-clock
   bring-up/readiness — the core calls only through this registered port.
+- Per-instance SPI framed-transport health diagnostics (`SPIROV` / `SPITUR` / `FRMERR`, sampled
+  once per completed RX block) — see "SPI framed-transport health diagnostics" below.
 - Multi-instance: leg count from `DSPIC33AK_TDM_USE_SPI2` (1 or 2). The physical-SPI mapping is
   FIXED in the core (leg 0 = SPI1, leg 1 = SPI2), NOT from `conf.h`; `conf.h` supplies each leg's
   DMA channels, geometry, and initial `SYNC_DOMAIN`. Per-leg format/role come from the runtime
@@ -50,6 +52,9 @@ needs.
 - No failsafe / board-specific teardown in the core — `close()` is a near-no-op; pin/clock
   release is left to the integrator (a future optional port deinit hook, not included).
 - No CMSIS-SAI types in the core — `ARM_SAI_*` must not appear here.
+- No automatic recovery from SPI framed-transport health-flag events (`SPIROV` / `SPITUR` /
+  `FRMERR`) — the HAL only counts occurrences (see "SPI framed-transport health diagnostics"
+  below); reacting to them is an app-layer policy decision.
 
 ## 3. Required project config
 
@@ -90,14 +95,27 @@ The HAL `#error`s on any other device. Adding a new dsPIC33AK part means adding 
 silicon facts in the HW layer (`dspic33ak_spi_i2s_tdm_hw.{c,h}`):
 
 - SPI instance count
-- `SPIxBUF` / `SPIxCON1` / `SPIxBRG` / `SPIxIMSK` pointers
+- `SPIxBUF` / `SPIxCON1` / `SPIxBRG` / `SPIxIMSK` / `SPIxSTAT` pointers
 - DMA trigger CHSEL values
 - CPU IRQ `IEC`/`IFS` masks
 
 The vendor part macro is confined to one `DSPIC33AK_SPI_I2S_TDM_DEVICE` adapter
 (opaque-tag derivation); app/HW code selects on that, not on the raw `__dsPIC33AK*__`.
 
-## 6. Interrupt ownership
+## 6. SPI framed-transport health diagnostics
+
+`dspic33ak_spi_i2s_tdm_hw_sample_ack_errflags(inst)` samples `SPIxSTAT` once per completed RX
+block (`SPIROV | SPITUR | FRMERR`) and is the HAL's single ack point for the two
+software-clearable bits, `SPIROV`/`FRMERR` (a W0C-safe write of only the software-clearable mask
+with the observed bits zeroed — never a replay of the whole status word, so a flag hardware sets
+between the read and the write is never lost). `SPITUR` self-clears only in hardware
+(`SPIEN=0`), so it is only ever observed. `dspic33ak_spi_i2s_tdm_diag_note_errflags()` folds the
+mask into four per-instance, per-RX-block counters read via `get_status()`:
+`err_rov_block_count` / `err_tur_block_count` / `err_frm_block_count` /
+`frmerr_consecutive_blocks`. See the root README for the full ownership contract and counter
+semantics.
+
+## 7. Interrupt ownership
 
 - `DSPIC33AK_TDM_DEFINE_DMA_VECTORS=1` (default): the HAL defines the RX DMA interrupt
   vectors itself (turnkey). Nothing else to wire.
@@ -107,7 +125,7 @@ The vendor part macro is confined to one `DSPIC33AK_SPI_I2S_TDM_DEVICE` adapter
 
 TX is interrupt-less (no TX interrupt is enabled by the transport).
 
-## 7. Tested envelope
+## 8. Tested envelope
 
 State honestly:
 
@@ -128,7 +146,7 @@ State honestly:
   loopback) and bench-verified via the starter on a dsPIC33AK Curiosity board (TDM8 master
   smoke, `FS_PULSE`/`FS_50PCT`, stop→restart, negative-config self-test matrix).
 
-## 8. CMSIS-SAI relationship
+## 9. CMSIS-SAI relationship
 
 - A CMSIS-SAI wrapper is a layer **above** this HAL, not part of it.
 - `ARM_SAI_*` types must not appear in this HAL core.
@@ -137,7 +155,11 @@ State honestly:
 - This HAL's native diagnostics use `block_deadline_miss_count`, `block_count`, `load`, and the
   framed-transport health counters `err_rov_block_count` / `err_tur_block_count` /
   `err_frm_block_count` / `frmerr_consecutive_blocks` (SPIROV/SPITUR/FRMERR, sampled once per
-  RX-block; see `get_status()`).
+  RX-block; see "SPI framed-transport health diagnostics" above).
+- **Naming note:** this HAL's `err_rov_block_count` / `err_tur_block_count` (hardware
+  `SPIROV`/`SPITUR`, sampled per RX block) are not the same signal as the CMSIS wrapper's
+  `rx_overflow` / `tx_underflow` (its own software buffer-semantics events, one layer up) — the
+  names read alike but the two pairs detect different failure modes at different layers.
 
 ---
 

@@ -57,6 +57,16 @@ void dspic33ak_spi_i2s_tdm_hw_module_enable( tdm_spi_inst_t inst, bool enable );
 void dspic33ak_spi_i2s_tdm_hw_irq_clear_flags( tdm_spi_inst_t inst );
 void dspic33ak_spi_i2s_tdm_hw_soft_stop( tdm_spi_inst_t inst );
 
+// Sample this instance's SPI framed-transport health flags (SPIxSTAT SPIROV/SPITUR/FRMERR) and
+// ack the software-clearable ones (SPIROV/FRMERR). SPITUR is R/HSC (not software-clearable; it
+// is only observed here, reflecting a live/dynamic underrun condition). Returns the full observed
+// mask (DSPIC33AK_SPI_I2S_TDM_STAT_* bits, as read, before any ack); 0 if none set or inst out of
+// range. Cheap (one SFR read + masked write-back), meant to be called once per RX-block ISR (the
+// driver otherwise runs with IGNROV/IGNTUR set and never inspects these HW flags). The HAL owns
+// these sticky bits once this is called -- other code reading raw SPIxSTAT afterward will see
+// SPIROV/FRMERR already acked.
+uint32_t dspic33ak_spi_i2s_tdm_hw_sample_ack_errflags( tdm_spi_inst_t inst );
+
 // Return the PPS output-function code (_RPOUT_SSx) for one SPI instance's frame-sync
 // (SSx = FRMSYNC output in framed master mode). Used by the CLC10 50%-FS module to find,
 // by reverse PPS lookup, which physical pin the board routed this instance's FS to.

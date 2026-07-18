@@ -134,7 +134,10 @@ State honestly:
 - `ARM_SAI_*` types must not appear in this HAL core.
 - The CMSIS wrapper owns Send/Receive buffer semantics, `tx_underflow` / `rx_overflow`,
   and sample-rate policy.
-- This HAL's native diagnostics use `block_deadline_miss_count`, `block_count`, and `load`.
+- This HAL's native diagnostics use `block_deadline_miss_count`, `block_count`, `load`, and the
+  framed-transport health counters `err_rov_block_count` / `err_tur_block_count` /
+  `err_frm_block_count` / `frmerr_consecutive_blocks` (SPIROV/SPITUR/FRMERR, sampled once per
+  RX-block; see `get_status()`).
 
 ---
 

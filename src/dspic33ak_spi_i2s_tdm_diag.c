@@ -9,6 +9,7 @@
 #include <stddef.h>                   // NULL
 #include "dspic33ak_high_res_timer.h" // dspic33ak_high_res_timer_* (ISR load/time monitor; runtime-gated via is_initialized())
 #include "dspic33ak_dma.h"            // dspic33ak_dma_status_has_half_done_conflict()
+#include "dspic33ak_spi_i2s_tdm_reg.h" // DSPIC33AK_SPI_I2S_TDM_STAT_* masks (note_errflags)
 
 
 //===========================================================
@@ -52,6 +53,10 @@ void dspic33ak_spi_i2s_tdm_diag_reset( dspic33ak_spi_i2s_tdm_diag_t* d )
 
     d->block_count               = 0u;
     d->block_deadline_miss_count = 0u;
+    d->err_rov_block_count        = 0u;
+    d->err_tur_block_count        = 0u;
+    d->err_frm_block_count        = 0u;
+    d->frmerr_consecutive_blocks  = 0u;
     d->isr_start_count           = 0u;
     d->isr_last_count            = 0u;
     d->isr_min_count             = 0xFFFFFFFFUL;
@@ -152,6 +157,34 @@ void dspic33ak_spi_i2s_tdm_diag_note_block( dspic33ak_spi_i2s_tdm_diag_t* d )
         return;
     }
     d->block_count++;
+}
+
+
+/*
+ * Sample framed-transport health: fold one RX-block's SPIxSTAT flag observation into this
+ * instance's diagnostics. MUST be called once per completed block (even when flags==0) so
+ * frmerr_consecutive_blocks resets on a clean block. `flags` is the
+ * dspic33ak_spi_i2s_tdm_hw_sample_ack_errflags() mask. Each counter counts RX BLOCKS in which its
+ * bit was observed, not raw event occurrences. When FRMERR is absent, frmerr_consecutive_blocks
+ * is reset to zero; the other counters are unchanged when flags == 0.
+ */
+void dspic33ak_spi_i2s_tdm_diag_note_errflags( dspic33ak_spi_i2s_tdm_diag_t* d, uint32_t flags )
+{
+    if( d == NULL )
+    {
+        return;
+    }
+    if( flags & DSPIC33AK_SPI_I2S_TDM_STAT_SPIROV ) { d->err_rov_block_count++; }
+    if( flags & DSPIC33AK_SPI_I2S_TDM_STAT_SPITUR ) { d->err_tur_block_count++; }
+    if( flags & DSPIC33AK_SPI_I2S_TDM_STAT_FRMERR )
+    {
+        d->err_frm_block_count++;
+        d->frmerr_consecutive_blocks++;
+    }
+    else
+    {
+        d->frmerr_consecutive_blocks = 0u;   // FRMERR absent this block -> break the run
+    }
 }
 
 

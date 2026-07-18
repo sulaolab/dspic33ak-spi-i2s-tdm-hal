@@ -36,6 +36,10 @@
 typedef struct {
     volatile uint32_t block_count;               // completed blocks since reset()
     volatile uint32_t block_deadline_miss_count; // HALF+DONE conflicts on this instance since reset()
+    volatile uint32_t err_rov_block_count;        // RX blocks where SPIROV was observed, since reset()
+    volatile uint32_t err_tur_block_count;        // RX blocks where SPITUR was observed set, since reset()
+    volatile uint32_t err_frm_block_count;        // RX blocks where FRMERR was observed, since reset()
+    volatile uint32_t frmerr_consecutive_blocks;  // consecutive RX blocks with FRMERR observed (0 on a clean block)
     volatile uint32_t isr_start_count;           // timer count at the current ISR entry
     volatile uint32_t isr_last_count;            // ticks of the last completed ISR
     volatile uint32_t isr_min_count;             // min ticks since the last clear_peak
@@ -57,6 +61,15 @@ void dspic33ak_spi_i2s_tdm_diag_isr_end( dspic33ak_spi_i2s_tdm_diag_t* d );
 // Count one completed block for THIS instance's RX-block ISR (read via
 // *_read_counts() / get_status()). Each instance keeps its own block_count.
 void dspic33ak_spi_i2s_tdm_diag_note_block( dspic33ak_spi_i2s_tdm_diag_t* d );
+
+// Fold one RX-block ISR's SPI framed-transport health-flag observation into this instance's
+// diagnostics. `flags` is the mask from dspic33ak_spi_i2s_tdm_hw_sample_ack_errflags()
+// (DSPIC33AK_SPI_I2S_TDM_STAT_SPIROV/SPITUR/FRMERR); each counter counts RX BLOCKS in which its
+// bit was observed set, not raw event occurrences -- a flag that stays set across several blocks
+// (e.g. SPITUR while an underrun condition persists) increments once per block, not once per
+// underlying event. When FRMERR is absent, frmerr_consecutive_blocks is reset to zero; the other
+// counters are unchanged when flags == 0. Read back via get_status().
+void dspic33ak_spi_i2s_tdm_diag_note_errflags( dspic33ak_spi_i2s_tdm_diag_t* d, uint32_t flags );
 
 // Update deadline diagnostics from THIS instance's DMA status snapshot. A HALF+DONE
 // conflict means this instance's RX-block ISR fell a full block behind, so it counts

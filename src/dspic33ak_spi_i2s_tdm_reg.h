@@ -49,6 +49,18 @@
 #define DSPIC33AK_SPI_I2S_TDM_IMSK_SPIRBFEN (1UL << 0)    /* SPIxIMSKbits.SPIRBFEN */
 #define DSPIC33AK_SPI_I2S_TDM_IMSK_SPITBEN  (1UL << 3)    /* SPIxIMSKbits.SPITBEN  */
 
+/* ---- SPIxSTAT status bits (sticky HW health flags) ----
+ * Bit positions from p33AK512MPS512.h / p33AK128MC106.h tagSPI1STATBITS (SPIxSTAT is a 32-bit SFR):
+ *   SPIRBF=0 SPITBF=1 SPITBE=3 SPIRBE=5 SPIROV=6 SRMT=7 SPITUR=8 SPIBUSY=11 FRMERR=12.
+ * SPIROV and FRMERR are R/C/HS (software-clearable by writing the bit to 0). SPITUR is R/HSC
+ * (hardware self-clearing on SPIEN=0, NOT software-clearable) and reflects a live/dynamic
+ * underrun condition -- it is only observed, never written. These flags are NOT normally
+ * monitored by the driver (which runs with IGNROV/IGNTUR set); the framed-transport health
+ * sampling in dspic33ak_spi_i2s_tdm_hw.c reads+acks them once per RX-block ISR. */
+#define DSPIC33AK_SPI_I2S_TDM_STAT_SPIROV   (1UL << 6)    /* receive overflow  */
+#define DSPIC33AK_SPI_I2S_TDM_STAT_SPITUR   (1UL << 8)    /* transmit underrun */
+#define DSPIC33AK_SPI_I2S_TDM_STAT_FRMERR   (1UL << 12)   /* frame-sync error  */
+
 /* ---- Minimal generic 32-bit SFR access helpers ---- */
 /*
  * Set one or more bits in a 32-bit SFR.

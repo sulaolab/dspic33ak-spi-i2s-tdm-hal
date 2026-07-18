@@ -210,6 +210,10 @@ typedef struct {
     bool                        running;      // is_running(): stream actually started (start..stop)
     uint32_t                    block_count;  // completed blocks since start()
     uint32_t                     block_deadline_miss_count; // HALF+DONE conflicts since start()
+    uint32_t                    err_rov_block_count;       // RX blocks where SPIROV was observed, since start()
+    uint32_t                    err_tur_block_count;       // RX blocks where SPITUR was observed set, since start()
+    uint32_t                    err_frm_block_count;       // RX blocks where FRMERR was observed, since start()
+    uint32_t                    frmerr_consecutive_blocks; // consecutive RX blocks with FRMERR observed (0 when clean)
     dspic33ak_spi_i2s_tdm_load_t load;         // block-ISR load/time monitor
 } dspic33ak_spi_i2s_tdm_status_t;
 

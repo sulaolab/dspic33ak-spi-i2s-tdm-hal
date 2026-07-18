@@ -393,12 +393,16 @@ uint32_t dspic33ak_spi_i2s_tdm_hw_sample_ack_errflags( tdm_spi_inst_t inst )
                         & ( DSPIC33AK_SPI_I2S_TDM_STAT_SPIROV
                           | DSPIC33AK_SPI_I2S_TDM_STAT_SPITUR
                           | DSPIC33AK_SPI_I2S_TDM_STAT_FRMERR );
-    const uint32_t clearable = observed
-                        & ( DSPIC33AK_SPI_I2S_TDM_STAT_SPIROV
-                          | DSPIC33AK_SPI_I2S_TDM_STAT_FRMERR );
+    const uint32_t sw_clearable_mask = DSPIC33AK_SPI_I2S_TDM_STAT_SPIROV
+                                      | DSPIC33AK_SPI_I2S_TDM_STAT_FRMERR;
+    const uint32_t clearable = observed & sw_clearable_mask;
     if( clearable != 0u )
     {
-        *stat = status & ~clearable;   // ack only the software-clearable bits we observed
+        // W0C-safe ack: write only the software-clearable mask with the bits we just
+        // observed cleared to 0. Never replay the stale `status` snapshot -- doing so
+        // would risk silently clearing a flag hardware set between the read above and
+        // this write (a torn write against sticky HW flags).
+        *stat = sw_clearable_mask & ~clearable;
     }
     return observed;
 }

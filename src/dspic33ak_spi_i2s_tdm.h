@@ -187,11 +187,12 @@ typedef void (*dspic33ak_spi_i2s_tdm_block_cb_t)( const int32_t* src,
                                                   int32_t*       dst,
                                                   void*          user );
 
-// Opaque per-physical-SPI instance handle. The engine exposes the SPI legs (SPI1 + optional
-// SPI2; legs sharing a sync_domain are co-clocked and started phase-locked as a group, legs in
-// different domains are started/rolled-back separately and need not share BCLK/FS -- but this is
-// NOT full independence: source-readiness is engine-wide/primary-gated and some board resources
-// (CLC10, the clock port) are shared) through the accessors below; pass the handle to
+// Opaque per-leg instance handle. The engine exposes the built dense logical leg table, backed
+// by up to four physical SPI instances on AK512. Legs sharing a sync_domain are co-clocked and
+// started phase-locked as a group; legs in different domains are started/rolled-back separately
+// and need not share BCLK/FS -- but this is NOT full independence: source-readiness is
+// engine-wide/primary-gated and some board resources (CLC10, the clock port) are shared. Use the
+// logical inst(i) or literal physical spiN() accessors below, then pass the handle to
 // inst_configure()/inst_start()/inst_stop()/set_block_callback()/inst_get_status() to
 // drive or query that one instance. The shared board/clock port is brought up once via
 // open()/close(); the app owns the multi-instance ordering.

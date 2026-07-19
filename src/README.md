@@ -31,7 +31,7 @@ needs.
 - Optional board/clock **port** hook (`set_port()`) for pin/CLC routing and external-clock
   bring-up/readiness — the core calls only through this registered port.
 - Per-instance SPI framed-transport health diagnostics (`SPIROV` / `SPITUR` / `FRMERR`, sampled
-  once per completed RX block) — see "SPI framed-transport health diagnostics" below.
+  once per completed RX block) — see "DMA and SPI transport-health diagnostics" below.
 - Multi-instance: the core owns a dense logical leg table. The default bank maps rows 0/1 to
   physical SPI1/SPI2; `DSPIC33AK_TDM_BASE_ON_SPI34` explicitly maps those rows to SPI3/SPI4.
   `spi1()`...`spi4()` always mean literal physical peripherals; application-semantic legs use
@@ -55,7 +55,7 @@ needs.
   release is left to the integrator (a future optional port deinit hook, not included).
 - No CMSIS-SAI types in the core — `ARM_SAI_*` must not appear here.
 - No automatic recovery from SPI framed-transport health-flag events (`SPIROV` / `SPITUR` /
-  `FRMERR`) — the HAL only records per-RX-block observations (see "SPI framed-transport health
+  `FRMERR`) — the HAL only records per-RX-block observations (see "DMA and SPI transport-health
   diagnostics" below); reacting to them is an app-layer policy decision.
 
 ## 3. Required project config
@@ -88,6 +88,11 @@ Currently supported (silicon facts present):
 
 - `__dsPIC33AK512MPS512__`
 - `__dsPIC33AK128MC106__`
+
+Topology availability differs by device:
+
+- **AK512:** SPI1/2, the explicit SPI3/4 test bank, and four-leg SPI1..4 topologies are available.
+- **AK128:** paired SPI3/4 and four-leg modes are unavailable because SPI4 and DMA6/7 are absent.
 
 > Note: the `FS_50PCT`-via-**CLC10** path (TDM master) requires CLC10 + virtual pin RPV8, so
 > it is **AK512-only**. On **AK128** (no CLC10) a TDM master uses `FS_PULSE`; `FS_PULSE` and
@@ -169,7 +174,7 @@ State honestly:
   `rx_dma_last_status`, and the
   framed-transport health counters `err_rov_block_count` / `err_tur_block_count` /
   `err_frm_block_count` / `frmerr_consecutive_blocks` (SPIROV/SPITUR/FRMERR, sampled once per
-  RX-block; see "SPI framed-transport health diagnostics" above).
+  RX-block; see "DMA and SPI transport-health diagnostics" above).
 - **Naming note:** this HAL's `err_rov_block_count` / `err_tur_block_count` (hardware
   `SPIROV`/`SPITUR`, sampled per RX block) are not the same signal as the CMSIS wrapper's
   `rx_overflow` / `tx_underflow` (its own software buffer-semantics events, one layer up) — the

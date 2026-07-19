@@ -18,8 +18,9 @@ Oscilloscope capture from the dspic33ak-hal-starter TDM8 **master** smoke demo
 running on a dsPIC33AK Curiosity board (MikroBUS-A pins, no codec). BCLK
 ~12.5 MHz (yellow); frame sync FS ~49 kHz (blue) — here the **50%-duty** LRCLK-style
 FS produced by the HAL's `fs_shape = FS_50PCT` option (CLC10-generated, BCLK/FS = 256);
-DataOut with 8 × 32-bit slots (red). This HAL drives the signal; board pin routing
-and DMA configuration are supplied by the integrating project — see
+DataOut with 8 × 32-bit slots (red). This HAL drives the signal. The integrating
+project supplies board routing, DMA-channel allocation, and global DMA initialization;
+the HAL programs and arms the channels — see
 [dspic33ak-hal-starter](https://github.com/sulaolab/dspic33ak-hal-starter) for
 a complete worked example.
 
@@ -50,7 +51,7 @@ a complete worked example.
 - Optional board/clock **port** hook (`set_port()`) for pin/CLC routing and external-clock
   bring-up/readiness — the core calls only through this registered port.
 - Per-instance SPI framed-transport health diagnostics (`SPIROV` / `SPITUR` / `FRMERR`, sampled
-  once per completed RX block) — see "SPI framed-transport health diagnostics" below.
+  once per completed RX block) — see "DMA and SPI transport-health diagnostics" below.
 - Multi-instance: the core owns a dense logical leg table. The default bank maps rows 0/1 to
   physical SPI1/SPI2; `DSPIC33AK_TDM_BASE_ON_SPI34` explicitly maps those same rows to SPI3/SPI4.
   `spi1()`...`spi4()` always mean literal physical peripherals, while application-semantic legs
@@ -73,7 +74,7 @@ a complete worked example.
   release is left to the integrator (a future optional port deinit hook, not included).
 - No CMSIS-SAI types in the core — `ARM_SAI_*` must not appear here.
 - No automatic recovery from SPI framed-transport health-flag events (`SPIROV` / `SPITUR` /
-  `FRMERR`) — the HAL only records per-RX-block observations (see "SPI framed-transport health
+  `FRMERR`) — the HAL only records per-RX-block observations (see "DMA and SPI transport-health
   diagnostics" below); deciding how to react (log, mute, restart the stream, ignore) is an
   app-layer policy decision.
 
@@ -108,6 +109,11 @@ Currently supported (silicon facts present):
 - `__dsPIC33AK512MPS512__`
 - `__dsPIC33AK128MC106__`
 
+Topology availability differs by device:
+
+- **AK512:** SPI1/2, the explicit SPI3/4 test bank, and four-leg SPI1..4 topologies are available.
+- **AK128:** paired SPI3/4 and four-leg modes are unavailable because SPI4 and DMA6/7 are absent.
+
 > Note: the `FS_50PCT`-via-**CLC10** path (TDM master) is a feature of parts that have CLC10 +
 > virtual pin RPV8 — i.e. **AK512**. On **AK128** (no CLC10) it is unavailable: `engage()`
 > reports `NO_FS_PIN` and a TDM master can use `FS_PULSE`. `FS_PULSE` and I2S-native
@@ -134,7 +140,9 @@ The RX ISR preserves raw `DMAxSTAT` before resolving a completed ping-pong half:
 - `rx_dma_last_status` exposes the latest raw snapshot.
 
 An OVERRUN-only interrupt therefore remains visible even though no audio block can be delivered.
-This is the primary RAM-service failure signal; `SPIROV`/`SPITUR` are downstream FIFO effects.
+RX `DMAxSTAT.OVERRUN` is the primary RX-DMA request-overrun signal. `SPIROV` may appear
+downstream when RX service stalls. `SPITUR` independently reports TX FIFO starvation, while
+`FRMERR` reports frame-sync health.
 
 `IGNROV` and `IGNTUR` are deliberately hard-forced to 1 by the HAL and are no longer caller
 configuration fields. This prevents a secondary FIFO flag from critical-stopping the SPI leg and
@@ -210,7 +218,7 @@ State honestly:
   `rx_dma_last_status`, and the
   framed-transport health counters `err_rov_block_count` / `err_tur_block_count` /
   `err_frm_block_count` / `frmerr_consecutive_blocks` (SPIROV/SPITUR/FRMERR, sampled once per
-  RX-block; see "SPI framed-transport health diagnostics" above).
+  RX-block; see "DMA and SPI transport-health diagnostics" above).
 - **Naming note — do not confuse the two layers' event names.** This HAL's
   `err_rov_block_count` / `err_tur_block_count` count the SPI **hardware** flags `SPIROV` /
   `SPITUR`, sampled once per RX block at the transport layer. The CMSIS wrapper's

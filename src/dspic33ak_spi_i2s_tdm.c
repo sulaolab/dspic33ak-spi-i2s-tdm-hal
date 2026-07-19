@@ -88,7 +88,7 @@ typedef enum {
 } tdm_spi_leg_index_t;
 
 // Which leg the arg-less singleton status API reports is the stream's primary_leg_index
-// (tdm_stream_t), defaulting to leg 0 (SPI1). It is NOT a clock master and NOT a hard
+// (tdm_stream_t), defaulting to logical leg 0. It is NOT a clock master and NOT a hard
 // timing coupling -- every leg times itself via its own RX-block ISR; the clock role
 // (master/slave) is a separate per-leg concern in config.clock_role.
 
@@ -344,7 +344,7 @@ static tdm_stream_t s_stream =
 {
     .legs              = s_spi_legs,
     .leg_count         = (uint8_t)TDM_ARRAY_SIZE(s_spi_legs),
-    .primary_leg_index = (uint8_t)TDM_SPI_LEG_SPI1,   // leg 0 (SPI1) = co-clock anchor / singleton-reporting leg
+    .primary_leg_index = (uint8_t)TDM_SPI_LEG_SPI1,   // logical leg 0 = co-clock anchor / singleton-reporting leg
     .opened            = false,
     .port              = NULL,
 };
@@ -1734,7 +1734,7 @@ static void tdm_stop_all_domains_impl( void )
 
 
 // Public SYSTEM-mode stop of every sync domain. Domain-level teardown counterpart to
-// start_all_domains() so callers never enumerate individual legs (SPI1/SPI2/...). Rejects
+// start_all_domains() so callers never enumerate individual logical legs. Rejects
 // (false, HW unchanged) unless the stream was committed via configure_system() (mode==SYSTEM);
 // a SINGLE-mode stream tears down through inst_stop(). Idempotent success otherwise.
 bool dspic33ak_spi_i2s_tdm_stop_all_domains( void )

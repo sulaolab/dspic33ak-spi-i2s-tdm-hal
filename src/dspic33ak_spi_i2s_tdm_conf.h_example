@@ -35,8 +35,9 @@
 //   DSPIC33AK_TDM_SLOTS_PER_FS   slots per frame-sync: TDM8 = 8, I2S = 2.
 //   DSPIC33AK_TDM_BLOCK_FRAMES   frames per ping/pong half (DMA block size).
 //   DSPIC33AK_TDM_USE_SPI2      1 = second logical transport row is built.
-//   DSPIC33AK_TDM_USE_SPI3/4    1 = additional physical SPI3/SPI4 rows are built.
-//   DSPIC33AK_TDM_BASE_ON_SPI34 1 = remap logical rows 0/1 from SPI1/2 to SPI3/4.
+//   DSPIC33AK_TDM_USE_SPI3/4    1 = additional physical SPI3/SPI4 rows are built (AK512 only).
+//   DSPIC33AK_TDM_BASE_ON_SPI34 1 = remap logical rows 0/1 from SPI1/2 to SPI3/4 (AK512 only).
+// AK128 has no SPI4 or DMA6/7, so paired SPI3/4 and four-leg modes are unavailable.
 // (Sample rate is NOT a setting here -- the transport is rate-agnostic; the product's
 // supported-rate policy lives in the app layer, not the HAL.)
 // The core's static DMA ping-pong buffers are sized 2 * SLOTS_PER_FS *

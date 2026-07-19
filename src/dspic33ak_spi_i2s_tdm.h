@@ -151,9 +151,9 @@ typedef struct {
     bool     bclk_change_on_active_to_idle;         // CKE
     // NOTE: IGNROV and IGNTUR are NOT exposed here on purpose. Continuous DMA audio keeps both set
     // so a secondary FIFO error cannot critical-stop the SPI leg and hide the primary failure.
-    // This is a continuity/containment policy, NOT a claim that data loss is benign. DMAxSTAT.OVERRUN
-    // is captured separately as the primary RAM-service failure signal; SPIROV/SPITUR/FRMERR remain
-    // sampled per block for downstream effects and framing health.
+    // This is a continuity/containment policy, NOT a claim that data loss is benign. RX
+    // DMAxSTAT.OVERRUN is captured separately as the RX-DMA request-overrun signal. SPIROV may
+    // follow stalled RX service; SPITUR independently reports TX starvation; FRMERR tracks framing.
 } dspic33ak_spi_i2s_tdm_config_t;
 
 // Clock-change event reported by the registered port's external-clock detector (if the board
@@ -172,10 +172,10 @@ typedef enum {
 // instance's RX-block ISR calls this for each completed block: src = the RX ping/pong
 // half just captured by THIS instance; dst = the TX ping/pong half of THIS instance
 // to fill; user = opaque context. One callback handles exactly one physical SPI's
-// RX/TX block -- there is no dst_b / "second output": when two SPI instances are
-// running, each has its own callback, and any cross-instance routing (e.g. mirroring
-// one input to both outputs) is the application's job, done explicitly through a
-// shared buffer between the two callbacks.
+// RX/TX block -- there is no dst_b / "second output": when multiple instances run,
+// each has its own callback. Cross-instance routing is application policy. It may use
+// an application-owned handoff buffer, or the candidate co-clock mirror helpers below
+// when one callback directly produces a co-clocked sibling's TX block.
 // Contract: register it (set_block_callback) BEFORE start(); do NOT clear it while
 // running. If no callback is registered for an instance, that instance runs no
 // app/DSP path (its zeroed TX half stays silent).
@@ -195,7 +195,8 @@ typedef void (*dspic33ak_spi_i2s_tdm_block_cb_t)( const int32_t* src,
 // logical inst(i) or literal physical spiN() accessors below, then pass the handle to
 // inst_configure()/inst_start()/inst_stop()/set_block_callback()/inst_get_status() to
 // drive or query that one instance. The shared board/clock port is brought up once via
-// open()/close(); the app owns the multi-instance ordering.
+// open()/close(). The application selects the topology and lifecycle operation; the HAL
+// owns per-domain arm/go ordering and rollback.
 typedef struct dspic33ak_spi_i2s_tdm_inst_s dspic33ak_spi_i2s_tdm_inst_t;
 
 // Stream status snapshot. block_count is the number of completed audio
@@ -321,8 +322,8 @@ extern dspic33ak_spi_i2s_tdm_inst_t* dspic33ak_spi_i2s_tdm_spi4( void );
 
 //===========================================================
 // CANDIDATE / non-generic API (co-clocked dual-codec support). The four functions below
-// exist for a single-producer co-clocked A/B path (one leg's callback fills the
-// other leg's TX, plus phase probes measuring SPI1/SPI2 alignment). A generic single- or
+// exist for a single-producer co-clocked A/B path (one logical leg's callback fills a
+// sibling leg's TX, plus phase probes measuring their alignment). A generic single- or
 // independent-instance consumer does NOT need them. They are NOT part of the minimal public
 // transport contract and may change or move if that minimal transport contract is narrowed or
 // reorganized.
@@ -348,11 +349,12 @@ typedef enum {
 // Mirror a reference instance's fill half onto THIS instance's TX buffer (target selected
 // DETERMINISTICALLY from ref_fill_half -- valid for the whole block; a live-DMA read is used only
 // as a secondary safety veto). For the co-clocked single-producer dual-codec path: pass ref = the
-// producing leg (SPI1) and ref_fill_half = the `dst` its block callback received; on OK, *dst = the
-// same-index (not-transmitting, full-block-valid) half of `inst` (SPI2). Returns a typed result:
+// producing/reference leg and ref_fill_half = the `dst` its block callback received; on OK,
+// *dst = the same-index (not-transmitting, full-block-valid) half of the target `inst`. Returns a typed result:
 // on OK *dst is the writable half; on UNSAFE_ACTIVE_HALF / UNRESOLVED_DMA_POSITION / BAD_ARGUMENT
 // *dst is NULL and the caller must NOT write B this block (UNSAFE = fault now; UNRESOLVED = a
-// transient the caller tolerates for a few blocks then resyncs). Keeps A/B sample-aligned, race-free.
+// transient the caller tolerates for a few blocks then resyncs). Keeps co-clocked siblings
+// sample-aligned and race-free.
 extern dspic33ak_spi_i2s_tdm_mirror_result_t dspic33ak_spi_i2s_tdm_inst_tx_fill_mirror(
         dspic33ak_spi_i2s_tdm_inst_t*       inst,
         const dspic33ak_spi_i2s_tdm_inst_t* ref,
@@ -360,7 +362,7 @@ extern dspic33ak_spi_i2s_tdm_mirror_result_t dspic33ak_spi_i2s_tdm_inst_tx_fill_
         int32_t**                           dst );
 
 // Phase probe: which TX ping-pong half is this instance's DMA transmitting NOW?
-// 0 = ping, 1 = pong, -1 = unresolved. For measuring co-clocked SPI1/SPI2 alignment.
+// 0 = ping, 1 = pong, -1 = unresolved. For measuring co-clocked sibling alignment.
 extern int dspic33ak_spi_i2s_tdm_inst_tx_active_half( dspic33ak_spi_i2s_tdm_inst_t* inst );
 
 // Phase probe (finer): TX DMA current read position, word offset into [0, 2*half). -1 if

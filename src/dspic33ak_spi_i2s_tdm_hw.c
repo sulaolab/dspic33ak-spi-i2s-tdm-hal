@@ -186,8 +186,14 @@ void dspic33ak_spi_i2s_tdm_hw_apply_config( tdm_spi_inst_t inst,
     }                                           //  so no half-frame FRMCNT here.)
     dspic33ak_spi_i2s_tdm_reg_set_or_clear(con1, DSPIC33AK_SPI_I2S_TDM_CON1_FRMSYPW, frmsypw);
 
-    dspic33ak_spi_i2s_tdm_reg_set_or_clear(con1, DSPIC33AK_SPI_I2S_TDM_CON1_IGNROV, cfg->ignore_overflow);   // overflow not critical
-    dspic33ak_spi_i2s_tdm_reg_set_or_clear(con1, DSPIC33AK_SPI_I2S_TDM_CON1_IGNTUR, cfg->ignore_underrun);   // underflow not critical
+    // IGNROV and IGNTUR are BOTH HARD-FORCED to 1 (not caller-selectable -- the config struct
+    // deliberately omits both). If a FIFO flag becomes a critical-stop condition, it can suspend
+    // the SPI leg and turn a primary DMA service failure into a permanent callback stall. Keeping
+    // IGNROV/IGNTUR set is therefore continuity/secondary-fault containment, not an assertion that
+    // lost data is benign. The primary cause is observed directly as DMAxSTAT.OVERRUN (dov=); the
+    // downstream SPIROV/SPITUR and independent FRMERR effects remain visible as rov=/tur=/frm=.
+    dspic33ak_spi_i2s_tdm_reg_set_or_clear(con1, DSPIC33AK_SPI_I2S_TDM_CON1_IGNROV, true);
+    dspic33ak_spi_i2s_tdm_reg_set_or_clear(con1, DSPIC33AK_SPI_I2S_TDM_CON1_IGNTUR, true);
 
     // DISSDI/DISSDO/DISSCK left 0 = pins controlled by the module (already 0 after clear).
 

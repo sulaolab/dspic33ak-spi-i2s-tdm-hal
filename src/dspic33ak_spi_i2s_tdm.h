@@ -37,13 +37,15 @@
 // header -- it does not read app symbols. The publishable example config (conf.h_example in the
 // HAL folder) is self-contained and app-independent; an integrator may instead supply a conf.h
 // that derives DSPIC33AK_TDM_* from its own build config (that is the integrator's choice, not the
-// HAL's requirement). Instance COUNT is chosen by DSPIC33AK_TDM_USE_SPI2 (1 or 2). The physical-SPI
-// mapping is FIXED IN THE CORE (leg 0 = SPI1, leg 1 = SPI2) -- it does NOT come from conf.h; conf.h
-// supplies only each leg's RX/TX DMA channels, geometry (SLOTS_PER_FS / BLOCK_FRAMES), and initial
-// SYNC_DOMAIN seed. The core's leg enum, buffers, leg table, and _DMA<rx>Interrupt vectors are
-// explicit C keyed off those (no generator macro). Supported-device limitation: the silicon-facts
-// paths cover __dsPIC33AK512MPS512__ / __dsPIC33AK128MC106__ only (the core #error's otherwise;
-// other parts need their facts added). Known sibling-HAL dependencies: dspic33ak_dma (required),
+// HAL's requirement). The core owns a dense logical leg table. Each descriptor row stores an
+// explicit physical SPI instance plus its RX/TX DMA allocation. The default bank maps logical
+// legs 0/1 to SPI1/SPI2; the explicit SPI34 test bank maps those same rows to SPI3/SPI4. Dense
+// inst(i) accessors address logical rows, while spiN() searches the table for literal physical
+// SPIn. conf.h also supplies geometry (SLOTS_PER_FS / BLOCK_FRAMES) and initial SYNC_DOMAIN seeds.
+// The core's leg enum, buffers, leg table, and _DMA<rx>Interrupt vectors are explicit C keyed off
+// those build facts (no generator macro). Supported-device limitation: the silicon-facts paths
+// cover __dsPIC33AK512MPS512__ / __dsPIC33AK128MC106__ only (the core #error's otherwise; other
+// parts need their facts added). Known sibling-HAL dependencies: dspic33ak_dma (required),
 // and the load monitor's use of the hal_timer high-res public API (dspic33ak_high_res_timer_*,
 // runtime-gated via is_initialized()) -- a clean sibling-HAL dependency, like hal_dma. The
 // debug-only deps (<stdio.h>, dspic33ak_tick_timer.h for timestamps, board_dbg_pins.h scope pins)
@@ -147,8 +149,11 @@ typedef struct {
     bool     fs_coincides_first_bclk;               // SPIFE: 1=no delay, 0=1-bit delayed (ENA_1_BIT_DELAY)
     bool     bclk_idle_high;                        // CKP
     bool     bclk_change_on_active_to_idle;         // CKE
-    bool     ignore_overflow;                       // IGNROV
-    bool     ignore_underrun;                       // IGNTUR
+    // NOTE: IGNROV and IGNTUR are NOT exposed here on purpose. Continuous DMA audio keeps both set
+    // so a secondary FIFO error cannot critical-stop the SPI leg and hide the primary failure.
+    // This is a continuity/containment policy, NOT a claim that data loss is benign. DMAxSTAT.OVERRUN
+    // is captured separately as the primary RAM-service failure signal; SPIROV/SPITUR/FRMERR remain
+    // sampled per block for downstream effects and framing health.
 } dspic33ak_spi_i2s_tdm_config_t;
 
 // Clock-change event reported by the registered port's external-clock detector (if the board
@@ -210,6 +215,9 @@ typedef struct {
     bool                        running;      // is_running(): stream actually started (start..stop)
     uint32_t                    block_count;  // completed blocks since start()
     uint32_t                     block_deadline_miss_count; // HALF+DONE conflicts since start()
+    uint32_t                    rx_dma_overrun_count;      // RX IRQ snapshots with DMAxSTAT.OVERRUN
+    uint32_t                    rx_dma_other_irq_count;    // RX IRQ snapshots with neither HALF nor DONE
+    uint32_t                    rx_dma_last_status;        // raw DMAxSTAT from the latest RX IRQ
     uint32_t                    err_rov_block_count;       // RX blocks where SPIROV was observed, since start()
     uint32_t                    err_tur_block_count;       // RX blocks where SPITUR was observed set, since start()
     uint32_t                    err_frm_block_count;       // RX blocks where FRMERR was observed, since start()
@@ -260,7 +268,7 @@ typedef struct {
 //   - set_port()         : register the board/clock port (above). Call before
 //                          inst_configure()/open(); NULL reverts to the self-clocked,
 //                          no-gate default.
-//   - spi1()/spi2()      : per-physical-SPI instance handles.
+//   - spi1()...spi4()    : literal per-physical-SPI instance handles.
 //   - inst_configure()   : validate + store a config_t for one instance (no HW write).
 //   - set_block_callback(): register one instance's per-block event callback.
 //   - open()/close()     : shared board/clock port bring-up/teardown (once for the
@@ -275,7 +283,7 @@ typedef struct {
 //                          the domain API below.
 //   - is_active()        : clock/source readiness gate (NOT running).
 //   - is_running()       : primary-leg running state (start..stop).
-//   - get_load()/get_status()       : primary leg (default SPI1) load / status.
+//   - get_load()/get_status()       : primary logical leg (default index 0) load / status.
 //   - inst_get_load()/inst_get_status(): a specific instance's load / status.
 //   - inst_get_setup()   : read a specific instance's committed {stream, sync_domain}.
 //   (DMA interrupt vectors: default (DSPIC33AK_TDM_DEFINE_DMA_VECTORS=1) the HAL owns
@@ -295,17 +303,20 @@ typedef struct {
 // consumes the hooks, so the port must be fixed before open().
 extern bool dspic33ak_spi_i2s_tdm_set_port( const dspic33ak_spi_i2s_tdm_port_t* port );
 
-// Instance handles. The leg count is configurable (DSPIC33AK_TDM_USE_SPI2). instance_count()
+// Instance handles. The leg count is configurable (DSPIC33AK_TDM_USE_SPI2/3/4). instance_count()
 // returns how many instances this build has; inst(i) returns the i-th handle in leg-table
-// order (0 = leg SPI1, the default primary leg) or NULL if i is out of range. Together they
-// let a caller enumerate instances (for i in 0 .. instance_count()-1: inst(i)). spi1()/spi2()
-// are name-stable convenience wrappers: spi1() is the first instance; spi2() is the second,
-// or NULL when only one is built (DSPIC33AK_TDM_USE_SPI2 == 0). Use the handle with
+// order (0 = the default primary logical leg) or NULL if i is out of range. Together they
+// let a caller enumerate instances (for i in 0 .. instance_count()-1: inst(i)). spiN() searches
+// those descriptors for literal physical SPIn and returns NULL when SPIn is not present in this
+// build. Thus SPI34_TEST has inst(0)/inst(1) == codec A/B while spi1()/spi2() return NULL and
+// spi3()/spi4() return those physical rows. Use the handle with
 // set_block_callback(). (E.g. a CMSIS-SAI wrapper can map Driver_SAI0 -> spi1().)
 extern uint8_t                       dspic33ak_spi_i2s_tdm_instance_count( void );
 extern dspic33ak_spi_i2s_tdm_inst_t* dspic33ak_spi_i2s_tdm_inst( uint8_t index );
 extern dspic33ak_spi_i2s_tdm_inst_t* dspic33ak_spi_i2s_tdm_spi1( void );
 extern dspic33ak_spi_i2s_tdm_inst_t* dspic33ak_spi_i2s_tdm_spi2( void );
+extern dspic33ak_spi_i2s_tdm_inst_t* dspic33ak_spi_i2s_tdm_spi3( void );
+extern dspic33ak_spi_i2s_tdm_inst_t* dspic33ak_spi_i2s_tdm_spi4( void );
 
 //===========================================================
 // CANDIDATE / non-generic API (co-clocked dual-codec support). The four functions below
@@ -477,7 +488,7 @@ extern dspic33ak_spi_i2s_tdm_clock_event_t dspic33ak_spi_i2s_tdm_consume_clock_e
 // the stop->reconfigure->start it drives live in the application.
 
 // Snapshot the load monitor / status. The singleton forms report the PRIMARY leg
-// (primary_leg_index, default SPI1); the inst forms report a specific instance (use spi1()/spi2()).
+// (primary_leg_index, default logical leg 0); the inst forms report a specific instance.
 // For the inst forms, block_count/deadline_miss/load AND running are that instance's;
 // only active (the clock/source readiness gate) is engine-wide/shared.
 // clear_peak resets that instance's min/max/event peaks after the snapshot.

@@ -53,6 +53,9 @@ void dspic33ak_spi_i2s_tdm_diag_reset( dspic33ak_spi_i2s_tdm_diag_t* d )
 
     d->block_count               = 0u;
     d->block_deadline_miss_count = 0u;
+    d->rx_dma_overrun_count       = 0u;
+    d->rx_dma_other_irq_count     = 0u;
+    d->rx_dma_last_status         = 0u;
     d->err_rov_block_count        = 0u;
     d->err_tur_block_count        = 0u;
     d->err_frm_block_count        = 0u;
@@ -63,6 +66,35 @@ void dspic33ak_spi_i2s_tdm_diag_reset( dspic33ak_spi_i2s_tdm_diag_t* d )
     d->isr_max_count             = 0u;
     d->isr_event_count           = 0u;
     d->isr_measure_active        = false;
+}
+
+
+/*
+ * Preserve one raw RX-DMA IRQ cause before HALF/DONE resolution.
+ *
+ * DMAxSTAT.OVERRUN is the primary transport-stall signal: a request arrived while
+ * the channel still had a pending request. An overrun-only snapshot cannot map to a
+ * completed ping-pong half, so without this counter the core's early return would erase
+ * the root-cause evidence. The raw last value also keeps unexpected DMA status bits
+ * inspectable through the public status API.
+ */
+void dspic33ak_spi_i2s_tdm_diag_note_dma_status( dspic33ak_spi_i2s_tdm_diag_t* d,
+                                                 uint32_t dma_stat )
+{
+    if( d == NULL )
+    {
+        return;
+    }
+
+    d->rx_dma_last_status = dma_stat;
+    if( ( dma_stat & DSPIC33AK_DMA_STAT_OVERRUN ) != 0u )
+    {
+        d->rx_dma_overrun_count++;
+    }
+    if( ( dma_stat & ( DSPIC33AK_DMA_STAT_HALF | DSPIC33AK_DMA_STAT_DONE ) ) == 0u )
+    {
+        d->rx_dma_other_irq_count++;
+    }
 }
 
 

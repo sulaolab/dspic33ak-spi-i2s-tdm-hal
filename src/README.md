@@ -32,9 +32,11 @@ needs.
   bring-up/readiness — the core calls only through this registered port.
 - Per-instance SPI framed-transport health diagnostics (`SPIROV` / `SPITUR` / `FRMERR`, sampled
   once per completed RX block) — see "SPI framed-transport health diagnostics" below.
-- Multi-instance: leg count from `DSPIC33AK_TDM_USE_SPI2` (1 or 2). The physical-SPI mapping is
-  FIXED in the core (leg 0 = SPI1, leg 1 = SPI2), NOT from `conf.h`; `conf.h` supplies each leg's
-  DMA channels, geometry, and initial `SYNC_DOMAIN`. Per-leg format/role come from the runtime
+- Multi-instance: the core owns a dense logical leg table. The default bank maps rows 0/1 to
+  physical SPI1/SPI2; `DSPIC33AK_TDM_BASE_ON_SPI34` explicitly maps those rows to SPI3/SPI4.
+  `spi1()`...`spi4()` always mean literal physical peripherals; application-semantic legs use
+  dense `inst(0)`/`inst(1)`. `conf.h` supplies DMA channels, geometry, and initial `SYNC_DOMAIN`.
+  Per-leg format/role come from the runtime
   config. The core defines the leg enum/buffers/table/`_DMA<rx>Interrupt` vectors in explicit C
   (no generator macro). Enumerate with `instance_count()` + `inst(i)`. See the root README for a
   pre-refactor -> current migration map.
@@ -60,9 +62,9 @@ needs.
 
 - The project MUST provide `dspic33ak_spi_i2s_tdm_conf.h` on the include path.
 - The HAL folder ships a self-contained template: `dspic33ak_spi_i2s_tdm_conf.h_example`.
-- Copy/rename the example (or supply an equivalent header) and edit the geometry, the leg
-  count (`DSPIC33AK_TDM_USE_SPI2`), the per-instance DMA channels, and the per-leg
-  `SYNC_DOMAIN` defaults. `*.h_example` is never compiled.
+- Copy/rename the example (or supply an equivalent header) and edit the geometry, logical leg
+  count, optional SPI3/4 rows or explicit SPI34 bank selection, per-instance DMA channels, and
+  per-leg `SYNC_DOMAIN` defaults. `*.h_example` is never compiled.
 - The template is self-contained (no app-config dependency). A project MAY instead derive
   the `DSPIC33AK_TDM_*` macros from its own app config (Perseus does this in
   `src/dspic33ak_spi_i2s_tdm_conf.h`); that is the integrator's choice and does not make
@@ -102,7 +104,17 @@ silicon facts in the HW layer (`dspic33ak_spi_i2s_tdm_hw.{c,h}`):
 The vendor part macro is confined to one `DSPIC33AK_SPI_I2S_TDM_DEVICE` adapter
 (opaque-tag derivation); app/HW code selects on that, not on the raw `__dsPIC33AK*__`.
 
-## 6. SPI framed-transport health diagnostics
+## 6. DMA and SPI transport-health diagnostics
+
+The RX ISR preserves raw `DMAxSTAT` before HALF/DONE resolution.
+`rx_dma_overrun_count` records the primary SRAM-service failure signal, including an
+OVERRUN-only interrupt that cannot deliver an audio block. `rx_dma_other_irq_count` counts
+snapshots with neither HALF nor DONE, and `rx_dma_last_status` exposes the latest raw snapshot.
+
+The HAL deliberately hard-forces `IGNROV=1` and `IGNTUR=1`; these are no longer caller config
+fields. This prevents a downstream FIFO flag from critical-stopping the SPI leg and hiding the
+primary DMA failure. It does not make data loss benign, so the DMA and SPI diagnostics remain
+publicly visible.
 
 `dspic33ak_spi_i2s_tdm_hw_sample_ack_errflags(inst)` samples `SPIxSTAT` once per completed RX
 block (`SPIROV | SPITUR | FRMERR`) and is the HAL's single ack point for the two
@@ -152,7 +164,9 @@ State honestly:
 - `ARM_SAI_*` types must not appear in this HAL core.
 - The CMSIS wrapper owns Send/Receive buffer semantics, `tx_underflow` / `rx_overflow`,
   and sample-rate policy.
-- This HAL's native diagnostics use `block_deadline_miss_count`, `block_count`, `load`, and the
+- This HAL's native diagnostics use `block_deadline_miss_count`, `block_count`, `load`, the
+  RX-DMA diagnostics `rx_dma_overrun_count` / `rx_dma_other_irq_count` /
+  `rx_dma_last_status`, and the
   framed-transport health counters `err_rov_block_count` / `err_tur_block_count` /
   `err_frm_block_count` / `frmerr_consecutive_blocks` (SPIROV/SPITUR/FRMERR, sampled once per
   RX-block; see "SPI framed-transport health diagnostics" above).

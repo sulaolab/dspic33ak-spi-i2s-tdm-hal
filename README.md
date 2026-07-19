@@ -51,13 +51,12 @@ a complete worked example.
   bring-up/readiness — the core calls only through this registered port.
 - Per-instance SPI framed-transport health diagnostics (`SPIROV` / `SPITUR` / `FRMERR`, sampled
   once per completed RX block) — see "SPI framed-transport health diagnostics" below.
-- Multi-instance: the leg count is chosen by `DSPIC33AK_TDM_USE_SPI2` (1 or 2). The
-  physical-SPI mapping is **fixed in the core** (leg 0 = SPI1, leg 1 = SPI2) -- it does NOT
-  come from `conf.h`. What `conf.h` supplies per leg is the RX/TX DMA channels, the geometry
-  (`SLOTS_PER_FS` / `BLOCK_FRAMES`), and the initial `SYNC_DOMAIN`; per-leg format / clock role
-  come from the runtime config (`configure_system` / `inst_configure`). The core defines the
-  leg enum, ping-pong buffers, leg table, and `_DMA<rx>Interrupt` vectors in **explicit C**
-  (no generator macro). Enumerate with `instance_count()` + `inst(i)`.
+- Multi-instance: the core owns a dense logical leg table. The default bank maps rows 0/1 to
+  physical SPI1/SPI2; `DSPIC33AK_TDM_BASE_ON_SPI34` explicitly maps those same rows to SPI3/SPI4.
+  `spi1()`...`spi4()` always mean literal physical peripherals, while application-semantic legs
+  use `inst(0)`/`inst(1)`. `conf.h` supplies each leg's RX/TX DMA channels, geometry, and initial
+  `SYNC_DOMAIN`; per-leg format / clock role come from the runtime config. The core defines the
+  leg enum, ping-pong buffers, leg table, and `_DMA<rx>Interrupt` vectors in explicit C.
 
 ## 2. What this HAL does NOT do
 
@@ -82,10 +81,9 @@ a complete worked example.
 
 - The project MUST provide `dspic33ak_spi_i2s_tdm_conf.h` on the include path.
 - The HAL folder ships a self-contained template: `dspic33ak_spi_i2s_tdm_conf.h_example`.
-- Copy/rename the example (or supply an equivalent header) and edit the geometry
-  (`DSPIC33AK_TDM_SLOTS_PER_FS` / `_BLOCK_FRAMES`), the leg count (`DSPIC33AK_TDM_USE_SPI2`),
-  the per-instance DMA channels, and the per-leg `SYNC_DOMAIN` defaults. `*.h_example` is
-  never compiled.
+- Copy/rename the example (or supply an equivalent header) and edit the geometry, logical leg
+  count (`DSPIC33AK_TDM_USE_SPI2`), optional SPI3/4 rows or explicit SPI34 bank selection,
+  per-instance DMA channels, and per-leg `SYNC_DOMAIN` defaults. `*.h_example` is never compiled.
 - The template is self-contained (no app-config dependency). A project MAY instead derive
   the `DSPIC33AK_TDM_*` macros from its own app config (Perseus does this in
   `src/dspic33ak_spi_i2s_tdm_conf.h`); that is the integrator's choice and does not make
@@ -127,7 +125,21 @@ silicon facts in the HW layer (`dspic33ak_spi_i2s_tdm_hw.{c,h}`):
 The vendor part macro is confined to one `DSPIC33AK_SPI_I2S_TDM_DEVICE` adapter
 (opaque-tag derivation); app/HW code selects on that, not on the raw `__dsPIC33AK*__`.
 
-## 6. SPI framed-transport health diagnostics
+## 6. DMA and SPI transport-health diagnostics
+
+The RX ISR preserves raw `DMAxSTAT` before resolving a completed ping-pong half:
+
+- `rx_dma_overrun_count` counts snapshots with `DMAxSTAT.OVERRUN`.
+- `rx_dma_other_irq_count` counts snapshots with neither `HALF` nor `DONE`.
+- `rx_dma_last_status` exposes the latest raw snapshot.
+
+An OVERRUN-only interrupt therefore remains visible even though no audio block can be delivered.
+This is the primary RAM-service failure signal; `SPIROV`/`SPITUR` are downstream FIFO effects.
+
+`IGNROV` and `IGNTUR` are deliberately hard-forced to 1 by the HAL and are no longer caller
+configuration fields. This prevents a secondary FIFO flag from critical-stopping the SPI leg and
+hiding the primary DMA failure. It is a continuity/containment policy, not a claim that lost data
+is benign; all DMA and SPI diagnostics remain observable.
 
 - `dspic33ak_spi_i2s_tdm_hw_sample_ack_errflags(inst)` samples `SPIxSTAT` once per completed
   RX block and returns the observed `SPIROV | SPITUR | FRMERR` mask (all three bits, as read,
@@ -193,7 +205,9 @@ State honestly:
 - `ARM_SAI_*` types must not appear in this HAL core.
 - The CMSIS wrapper owns Send/Receive buffer semantics, `tx_underflow` / `rx_overflow`,
   and sample-rate policy.
-- This HAL's native diagnostics use `block_deadline_miss_count`, `block_count`, `load`, and the
+- This HAL's native diagnostics use `block_deadline_miss_count`, `block_count`, `load`, the
+  RX-DMA diagnostics `rx_dma_overrun_count` / `rx_dma_other_irq_count` /
+  `rx_dma_last_status`, and the
   framed-transport health counters `err_rov_block_count` / `err_tur_block_count` /
   `err_frm_block_count` / `frmerr_consecutive_blocks` (SPIROV/SPITUR/FRMERR, sampled once per
   RX-block; see "SPI framed-transport health diagnostics" above).
@@ -216,8 +230,9 @@ against the old API will not compile until updated; the map:
 |---|---|
 | `dspic33ak_spi_i2s_tdm_role_t`, `..._ROLE_MASTER` / `..._ROLE_SLAVE` | `..._clock_role_t`, `..._CLOCK_MASTER` / `..._CLOCK_SLAVE` |
 | `config_t.role` | `config_t.clock_role` |
+| `config_t.ignore_overflow` / `ignore_underrun` | removed — the HAL hard-forces `IGNROV=1` / `IGNTUR=1` |
 | `open(role)` | `open(void)` — role derived from the committed primary leg |
-| `DSPIC33AK_TDM_INSTANCE_LIST(X)` X-macro + `BLOCK_REF` / `FOLLOWER` | explicit SPI1 / optional SPI2 in the core; leg count via `DSPIC33AK_TDM_USE_SPI2` |
+| `DSPIC33AK_TDM_INSTANCE_LIST(X)` X-macro + `BLOCK_REF` / `FOLLOWER` | dense logical leg table with literal physical `spiN()` accessors |
 | per-leg `inst_configure()` ×N for a multi-leg stream | `configure_system(setups, count)` (transactional, all-or-nothing) |
 | public `inst_arm()` / `inst_go()` | internal only — use `inst_start()` / `start_domain()` / `start_all_domains()` |
 

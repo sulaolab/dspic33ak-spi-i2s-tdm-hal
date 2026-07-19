@@ -36,6 +36,9 @@
 typedef struct {
     volatile uint32_t block_count;               // completed blocks since reset()
     volatile uint32_t block_deadline_miss_count; // HALF+DONE conflicts on this instance since reset()
+    volatile uint32_t rx_dma_overrun_count;       // RX ISR snapshots with DMAxSTAT.OVERRUN since reset()
+    volatile uint32_t rx_dma_other_irq_count;     // RX IRQ snapshots with neither HALF nor DONE since reset()
+    volatile uint32_t rx_dma_last_status;         // raw DMAxSTAT from the most recent RX IRQ
     volatile uint32_t err_rov_block_count;        // RX blocks where SPIROV was observed, since reset()
     volatile uint32_t err_tur_block_count;        // RX blocks where SPITUR was observed set, since reset()
     volatile uint32_t err_frm_block_count;        // RX blocks where FRMERR was observed, since reset()
@@ -79,6 +82,13 @@ void dspic33ak_spi_i2s_tdm_diag_note_errflags( dspic33ak_spi_i2s_tdm_diag_t* d, 
 void dspic33ak_spi_i2s_tdm_diag_check_deadline( dspic33ak_spi_i2s_tdm_diag_t* d,
                                                 uint8_t  dma_x,
                                                 uint32_t dma_stat );
+
+// Preserve the raw RX-DMA interrupt cause before the core resolves HALF/DONE. An
+// OVERRUN-only interrupt therefore remains visible even though no audio half can be
+// delivered. other_irq_count counts every snapshot lacking HALF/DONE and may overlap
+// rx_dma_overrun_count for an OVERRUN-only snapshot.
+void dspic33ak_spi_i2s_tdm_diag_note_dma_status( dspic33ak_spi_i2s_tdm_diag_t* d,
+                                                 uint32_t dma_stat );
 
 // Snapshot the load monitor into the public struct (and clear min/max/event when
 // clear_peak). Returns false (and zeroes the monitor) until at least one timed

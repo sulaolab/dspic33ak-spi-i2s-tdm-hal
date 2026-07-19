@@ -112,13 +112,15 @@ The vendor part macro is confined to one `DSPIC33AK_SPI_I2S_TDM_DEVICE` adapter
 ## 6. DMA and SPI transport-health diagnostics
 
 The RX ISR preserves raw `DMAxSTAT` before HALF/DONE resolution.
-`rx_dma_overrun_count` records the primary SRAM-service failure signal, including an
-OVERRUN-only interrupt that cannot deliver an audio block. `rx_dma_other_irq_count` counts
-snapshots with neither HALF nor DONE, and `rx_dma_last_status` exposes the latest raw snapshot.
+`rx_dma_overrun_count` records RX-DMA request-overrun snapshots, including an OVERRUN-only
+interrupt that cannot deliver an audio block. `rx_dma_other_irq_count` counts snapshots with
+neither HALF nor DONE, and `rx_dma_last_status` exposes the latest raw snapshot. `SPIROV` may
+appear downstream when RX service stalls; `SPITUR` independently reports TX FIFO starvation,
+while `FRMERR` reports frame-sync health.
 
 The HAL deliberately hard-forces `IGNROV=1` and `IGNTUR=1`; these are no longer caller config
-fields. This prevents a downstream FIFO flag from critical-stopping the SPI leg and hiding the
-primary DMA failure. It does not make data loss benign, so the DMA and SPI diagnostics remain
+fields. This prevents a FIFO flag from critical-stopping the SPI leg and obscuring earlier
+transport evidence. It does not make data loss benign, so the DMA and SPI diagnostics remain
 publicly visible.
 
 `dspic33ak_spi_i2s_tdm_hw_sample_ack_errflags(inst)` samples `SPIxSTAT` once per completed RX

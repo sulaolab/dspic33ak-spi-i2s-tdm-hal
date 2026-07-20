@@ -67,20 +67,28 @@
 // silicon layer (dspic33ak_spi_i2s_tdm_hw.*). The transport core indexes its own leg
 // table with the leg-index enum below and stores the physical SPI in each leg's spi_inst.
 //
-// Explicit leg-index enum: one TDM_SPI_LEG_<name> per physical SPI leg, in table order,
+// Explicit dense leg-index enum: one TDM_SPI_LEG_<name> per descriptor row, in table order,
 // terminated by TDM_SPI_LEG_COUNT (= the built-in leg count). Used only inside the core
-// (leg table / inst() / spi1()/spi2()), so it lives here rather than in a shared header.
+// (leg table / inst()), so it lives here rather than in a shared header. The SPI1/SPI2 row
+// names are legacy logical labels; DSPIC33AK_TDM_BASE_ON_SPI34 maps those same rows to
+// physical SPI3/SPI4. Public spiN() accessors search the stored physical spi_inst instead.
 // Adding a leg = add an enumerator here + its buffers, s_spi_legs[] row, and RX vector below.
 typedef enum {
     TDM_SPI_LEG_SPI1 = 0,
 #if DSPIC33AK_TDM_USE_SPI2
     TDM_SPI_LEG_SPI2,
 #endif
+#if DSPIC33AK_TDM_USE_SPI3
+    TDM_SPI_LEG_SPI3,
+#endif
+#if DSPIC33AK_TDM_USE_SPI4
+    TDM_SPI_LEG_SPI4,
+#endif
     TDM_SPI_LEG_COUNT
 } tdm_spi_leg_index_t;
 
 // Which leg the arg-less singleton status API reports is the stream's primary_leg_index
-// (tdm_stream_t), defaulting to leg 0 (SPI1). It is NOT a clock master and NOT a hard
+// (tdm_stream_t), defaulting to logical leg 0. It is NOT a clock master and NOT a hard
 // timing coupling -- every leg times itself via its own RX-block ISR; the clock role
 // (master/slave) is a separate per-leg concern in config.clock_role.
 
@@ -208,11 +216,26 @@ static inline void  tdm_get_dest_ptr( uint32_t dma_tx_addr, int32_t* const pTxDa
 // leg from the single global DSPIC33AK_TDM_SLOTS_PER_FS / _BLOCK_FRAMES. The names follow the leg
 // names so the leg table can wire them; same geometry macros as the leg table + ISR so the three
 // stay consistent.
-static int32_t    Tx_SPI1[ 2 * TDM_LEG_HALF_WORDS(DSPIC33AK_TDM_SLOTS_PER_FS, DSPIC33AK_TDM_BLOCK_FRAMES) ] __attribute__((aligned(4)));
-static int32_t    Rx_SPI1[ 2 * TDM_LEG_HALF_WORDS(DSPIC33AK_TDM_SLOTS_PER_FS, DSPIC33AK_TDM_BLOCK_FRAMES) ] __attribute__((aligned(4)));
+// Keep each complete ping-pong array on its own-size boundary. Besides making the DMA base
+// deterministic as unrelated BSS grows, this prevents one transfer array from straddling a
+// data-RAM bank boundary (observed when the bidirectional ASRC state grew from 8ch to 16ch).
+#define TDM_DMA_BUFFER_BYTES \
+    (2u * TDM_LEG_HALF_WORDS(DSPIC33AK_TDM_SLOTS_PER_FS, DSPIC33AK_TDM_BLOCK_FRAMES) * sizeof(int32_t))
+#define TDM_DMA_BUFFER_ALIGN TDM_DMA_BUFFER_BYTES
+TDM_COMPILEASSERT( (TDM_DMA_BUFFER_ALIGN & (TDM_DMA_BUFFER_ALIGN - 1u)) == 0u );
+static int32_t    Tx_SPI1[ 2 * TDM_LEG_HALF_WORDS(DSPIC33AK_TDM_SLOTS_PER_FS, DSPIC33AK_TDM_BLOCK_FRAMES) ] __attribute__((aligned(TDM_DMA_BUFFER_ALIGN)));
+static int32_t    Rx_SPI1[ 2 * TDM_LEG_HALF_WORDS(DSPIC33AK_TDM_SLOTS_PER_FS, DSPIC33AK_TDM_BLOCK_FRAMES) ] __attribute__((aligned(TDM_DMA_BUFFER_ALIGN)));
 #if DSPIC33AK_TDM_USE_SPI2
-static int32_t    Tx_SPI2[ 2 * TDM_LEG_HALF_WORDS(DSPIC33AK_TDM_SLOTS_PER_FS, DSPIC33AK_TDM_BLOCK_FRAMES) ] __attribute__((aligned(4)));
-static int32_t    Rx_SPI2[ 2 * TDM_LEG_HALF_WORDS(DSPIC33AK_TDM_SLOTS_PER_FS, DSPIC33AK_TDM_BLOCK_FRAMES) ] __attribute__((aligned(4)));
+static int32_t    Tx_SPI2[ 2 * TDM_LEG_HALF_WORDS(DSPIC33AK_TDM_SLOTS_PER_FS, DSPIC33AK_TDM_BLOCK_FRAMES) ] __attribute__((aligned(TDM_DMA_BUFFER_ALIGN)));
+static int32_t    Rx_SPI2[ 2 * TDM_LEG_HALF_WORDS(DSPIC33AK_TDM_SLOTS_PER_FS, DSPIC33AK_TDM_BLOCK_FRAMES) ] __attribute__((aligned(TDM_DMA_BUFFER_ALIGN)));
+#endif
+#if DSPIC33AK_TDM_USE_SPI3
+static int32_t    Tx_SPI3[ 2 * TDM_LEG_HALF_WORDS(DSPIC33AK_TDM_SLOTS_PER_FS, DSPIC33AK_TDM_BLOCK_FRAMES) ] __attribute__((aligned(TDM_DMA_BUFFER_ALIGN)));
+static int32_t    Rx_SPI3[ 2 * TDM_LEG_HALF_WORDS(DSPIC33AK_TDM_SLOTS_PER_FS, DSPIC33AK_TDM_BLOCK_FRAMES) ] __attribute__((aligned(TDM_DMA_BUFFER_ALIGN)));
+#endif
+#if DSPIC33AK_TDM_USE_SPI4
+static int32_t    Tx_SPI4[ 2 * TDM_LEG_HALF_WORDS(DSPIC33AK_TDM_SLOTS_PER_FS, DSPIC33AK_TDM_BLOCK_FRAMES) ] __attribute__((aligned(TDM_DMA_BUFFER_ALIGN)));
+static int32_t    Rx_SPI4[ 2 * TDM_LEG_HALF_WORDS(DSPIC33AK_TDM_SLOTS_PER_FS, DSPIC33AK_TDM_BLOCK_FRAMES) ] __attribute__((aligned(TDM_DMA_BUFFER_ALIGN)));
 #endif
 
 // Application processing buffers are outside the HAL's ownership. The HAL core owns and clears
@@ -239,9 +262,15 @@ static tdm_spi_leg_t s_spi_legs[] =
 {
     [TDM_SPI_LEG_SPI1] =
     {
+#if DSPIC33AK_TDM_BASE_ON_SPI34
+        .spi_inst               = TDM_SPI3,
+        .rx_dma_ch              = DSPIC33AK_TDM_SPI3_RX_DMA,
+        .tx_dma_ch              = DSPIC33AK_TDM_SPI3_TX_DMA,
+#else
         .spi_inst               = TDM_SPI1,
         .rx_dma_ch              = DSPIC33AK_TDM_SPI1_RX_DMA,
         .tx_dma_ch              = DSPIC33AK_TDM_SPI1_TX_DMA,
+#endif
         .rx_buffer              = Rx_SPI1,
         .tx_buffer              = Tx_SPI1,
         .buffer_word_count      = TDM_ARRAY_SIZE(Rx_SPI1),
@@ -255,9 +284,15 @@ static tdm_spi_leg_t s_spi_legs[] =
 #if DSPIC33AK_TDM_USE_SPI2
     [TDM_SPI_LEG_SPI2] =
     {
+#if DSPIC33AK_TDM_BASE_ON_SPI34
+        .spi_inst               = TDM_SPI4,
+        .rx_dma_ch              = DSPIC33AK_TDM_SPI4_RX_DMA,
+        .tx_dma_ch              = DSPIC33AK_TDM_SPI4_TX_DMA,
+#else
         .spi_inst               = TDM_SPI2,
         .rx_dma_ch              = DSPIC33AK_TDM_SPI2_RX_DMA,
         .tx_dma_ch              = DSPIC33AK_TDM_SPI2_TX_DMA,
+#endif
         .rx_buffer              = Rx_SPI2,
         .tx_buffer              = Tx_SPI2,
         .buffer_word_count      = TDM_ARRAY_SIZE(Rx_SPI2),
@@ -269,13 +304,47 @@ static tdm_spi_leg_t s_spi_legs[] =
         .diag                   = { .isr_min_count = 0xFFFFFFFFUL },
     },
 #endif // DSPIC33AK_TDM_USE_SPI2
+#if DSPIC33AK_TDM_USE_SPI3
+    [TDM_SPI_LEG_SPI3] =
+    {
+        .spi_inst               = TDM_SPI3,
+        .rx_dma_ch              = DSPIC33AK_TDM_SPI3_RX_DMA,
+        .tx_dma_ch              = DSPIC33AK_TDM_SPI3_TX_DMA,
+        .rx_buffer              = Rx_SPI3,
+        .tx_buffer              = Tx_SPI3,
+        .buffer_word_count      = TDM_ARRAY_SIZE(Rx_SPI3),
+        .geom_slots_per_fs      = (uint8_t)(DSPIC33AK_TDM_SLOTS_PER_FS),
+        .geom_block_frames      = (uint16_t)(DSPIC33AK_TDM_BLOCK_FRAMES),
+        .sync_domain            = (uint8_t)(DSPIC33AK_TDM_SPI3_SYNC_DOMAIN),
+        .block_cb               = NULL,
+        .block_user             = NULL,
+        .diag                   = { .isr_min_count = 0xFFFFFFFFUL },
+    },
+#endif // DSPIC33AK_TDM_USE_SPI3
+#if DSPIC33AK_TDM_USE_SPI4
+    [TDM_SPI_LEG_SPI4] =
+    {
+        .spi_inst               = TDM_SPI4,
+        .rx_dma_ch              = DSPIC33AK_TDM_SPI4_RX_DMA,
+        .tx_dma_ch              = DSPIC33AK_TDM_SPI4_TX_DMA,
+        .rx_buffer              = Rx_SPI4,
+        .tx_buffer              = Tx_SPI4,
+        .buffer_word_count      = TDM_ARRAY_SIZE(Rx_SPI4),
+        .geom_slots_per_fs      = (uint8_t)(DSPIC33AK_TDM_SLOTS_PER_FS),
+        .geom_block_frames      = (uint16_t)(DSPIC33AK_TDM_BLOCK_FRAMES),
+        .sync_domain            = (uint8_t)(DSPIC33AK_TDM_SPI4_SYNC_DOMAIN),
+        .block_cb               = NULL,
+        .block_user             = NULL,
+        .diag                   = { .isr_min_count = 0xFFFFFFFFUL },
+    },
+#endif // DSPIC33AK_TDM_USE_SPI4
 };
 
 static tdm_stream_t s_stream =
 {
     .legs              = s_spi_legs,
     .leg_count         = (uint8_t)TDM_ARRAY_SIZE(s_spi_legs),
-    .primary_leg_index = (uint8_t)TDM_SPI_LEG_SPI1,   // leg 0 (SPI1) = co-clock anchor / singleton-reporting leg
+    .primary_leg_index = (uint8_t)TDM_SPI_LEG_SPI1,   // logical leg 0 = co-clock anchor / singleton-reporting leg
     .opened            = false,
     .port              = NULL,
 };
@@ -362,6 +431,12 @@ TDM_COMPILEASSERT( (DSPIC33AK_TDM_SLOTS_PER_FS) <= (2147483647 / (2 * (DSPIC33AK
 TDM_COMPILEASSERT( TDM_ARRAY_SIZE(Rx_SPI1) == (2u * (DSPIC33AK_TDM_SLOTS_PER_FS) * (DSPIC33AK_TDM_BLOCK_FRAMES)) );
 #if DSPIC33AK_TDM_USE_SPI2
 TDM_COMPILEASSERT( TDM_ARRAY_SIZE(Rx_SPI2) == (2u * (DSPIC33AK_TDM_SLOTS_PER_FS) * (DSPIC33AK_TDM_BLOCK_FRAMES)) );
+#endif
+#if DSPIC33AK_TDM_USE_SPI3
+TDM_COMPILEASSERT( TDM_ARRAY_SIZE(Rx_SPI3) == (2u * (DSPIC33AK_TDM_SLOTS_PER_FS) * (DSPIC33AK_TDM_BLOCK_FRAMES)) );
+#endif
+#if DSPIC33AK_TDM_USE_SPI4
+TDM_COMPILEASSERT( TDM_ARRAY_SIZE(Rx_SPI4) == (2u * (DSPIC33AK_TDM_SLOTS_PER_FS) * (DSPIC33AK_TDM_BLOCK_FRAMES)) );
 #endif
 
 
@@ -455,7 +530,7 @@ static bool tdm_stream_ready_for_start( void )
 
 
 /*
- * Report the engine's running state = the PRIMARY leg (primary_leg_index, default SPI1).
+ * Report the engine's running state = the PRIMARY leg (primary_leg_index, default logical leg 0).
  *
  * Set by a successful inst_start() of the primary leg and cleared by its inst_stop(). It
  * is separate from is_active(), which only means the clock/source gate is ready. For
@@ -513,10 +588,10 @@ uint8_t dspic33ak_spi_i2s_tdm_instance_count( void )
 /*
  * Return the handle for one SPI instance, or NULL if index is out of range.
  *
- * index is a leg index in table order (0 = leg SPI1, the default primary leg). spi1()/spi2()
- * are thin, name-stable wrappers over it (spi1() = inst(TDM_SPI_LEG_SPI1); spi2() = the SPI2
- * leg or NULL when not built); the TDM_SPI_LEG_* names are core-internal. The handle is
- * the address of the static SPI leg descriptor.
+ * index is a dense logical leg index in table order (0 = primary leg). Physical spiN()
+ * accessors below search the descriptor table and return the row that actually owns SPIn;
+ * therefore their meaning remains literal even when a board maps logical legs 0/1 onto
+ * physical SPI3/SPI4.
  */
 dspic33ak_spi_i2s_tdm_inst_t* dspic33ak_spi_i2s_tdm_inst( uint8_t index )
 {
@@ -527,17 +602,41 @@ dspic33ak_spi_i2s_tdm_inst_t* dspic33ak_spi_i2s_tdm_inst( uint8_t index )
     return &s_spi_legs[index];
 }
 
+static dspic33ak_spi_i2s_tdm_inst_t* tdm_find_physical_spi( tdm_spi_inst_t spi_inst )
+{
+    uint8_t i;
+
+    for( i = 0u; i < s_stream.leg_count; i++ )
+    {
+        if( s_stream.legs[i].spi_inst == spi_inst )
+        {
+            return &s_stream.legs[i];
+        }
+    }
+    return NULL;
+}
+
 dspic33ak_spi_i2s_tdm_inst_t* dspic33ak_spi_i2s_tdm_spi1( void )
 {
-    return dspic33ak_spi_i2s_tdm_inst( TDM_SPI_LEG_SPI1 );   // leg index in the leg table
+    return tdm_find_physical_spi( TDM_SPI1 );
 }
 
 dspic33ak_spi_i2s_tdm_inst_t* dspic33ak_spi_i2s_tdm_spi2( void )
 {
-#if DSPIC33AK_TDM_USE_SPI2
-    return dspic33ak_spi_i2s_tdm_inst( TDM_SPI_LEG_SPI2 );
+    return tdm_find_physical_spi( TDM_SPI2 );
+}
+
+dspic33ak_spi_i2s_tdm_inst_t* dspic33ak_spi_i2s_tdm_spi3( void )
+{
+    return tdm_find_physical_spi( TDM_SPI3 );
+}
+
+dspic33ak_spi_i2s_tdm_inst_t* dspic33ak_spi_i2s_tdm_spi4( void )
+{
+#if DSPIC33AK_SPI_I2S_TDM_DEVICE == DSPIC33AK_SPI_I2S_TDM_DEV_AK512
+    return tdm_find_physical_spi( TDM_SPI4 );
 #else
-    return NULL;                                            // SPI2 not built -> no such leg
+    return NULL;
 #endif
 }
 
@@ -625,7 +724,7 @@ dspic33ak_spi_i2s_tdm_mirror_result_t dspic33ak_spi_i2s_tdm_inst_tx_fill_mirror(
     {
         return DSPIC33AK_TDM_MIRROR_BAD_ARGUMENT;
     }
-    // inst and ref must be handles returned by this HAL's accessors (spi1()/spi2()/inst(i)).
+    // inst and ref must be handles returned by this HAL's accessors (spiN()/inst(i)).
     // tdm_spi_leg_is_valid() checks each descriptor's local invariants (known SPI instance,
     // distinct RX/TX channels, non-NULL buffers) before use; it is not a defense against an
     // arbitrary bogus pointer. Reject on that check or a stopped inst as BAD_ARGUMENT.
@@ -997,8 +1096,8 @@ bool dspic33ak_spi_i2s_tdm_inst_get_setup( const dspic33ak_spi_i2s_tdm_inst_t* i
  * maps to FRMSYPW regardless of clock role (hw: FS_50PCT+I2S -> FRMSYPW=1, FS_PULSE -> 0), so
  * two co-clocked I2S legs with different fs_shape would read the SAME FS with different pulse
  * widths. Deliberately NOT compared (may legitimately differ per leg): clock_role (exactly one
- * master drives the shared clock, the rest are slaves), brg (a slave ignores it), mclk_enable,
- * and ignore_overflow/underrun.
+ * master drives the shared clock, the rest are slaves), brg (a slave ignores it), and
+ * mclk_enable. IGNROV/IGNTUR are HAL-fixed policies, not per-leg config fields.
  */
 static bool tdm_domain_framing_matches( const dspic33ak_spi_i2s_tdm_config_t* a,
                                         const dspic33ak_spi_i2s_tdm_config_t* b )
@@ -1635,7 +1734,7 @@ static void tdm_stop_all_domains_impl( void )
 
 
 // Public SYSTEM-mode stop of every sync domain. Domain-level teardown counterpart to
-// start_all_domains() so callers never enumerate individual legs (SPI1/SPI2/...). Rejects
+// start_all_domains() so callers never enumerate individual logical legs. Rejects
 // (false, HW unchanged) unless the stream was committed via configure_system() (mode==SYSTEM);
 // a SINGLE-mode stream tears down through inst_stop(). Idempotent success otherwise.
 bool dspic33ak_spi_i2s_tdm_stop_all_domains( void )
@@ -1784,6 +1883,9 @@ bool dspic33ak_spi_i2s_tdm_inst_get_status( dspic33ak_spi_i2s_tdm_inst_t* inst,
     status->err_tur_block_count       = inst->diag.err_tur_block_count;
     status->err_frm_block_count       = inst->diag.err_frm_block_count;
     status->frmerr_consecutive_blocks = inst->diag.frmerr_consecutive_blocks;
+    status->rx_dma_overrun_count      = inst->diag.rx_dma_overrun_count;
+    status->rx_dma_other_irq_count    = inst->diag.rx_dma_other_irq_count;
+    status->rx_dma_last_status        = inst->diag.rx_dma_last_status;
     tdm_rx_ie_restore( inst->rx_dma_ch, rxie_bak );
 
     // load monitor (does its own RX-IE guard; honours clear_peak)
@@ -1794,7 +1896,7 @@ bool dspic33ak_spi_i2s_tdm_inst_get_status( dspic33ak_spi_i2s_tdm_inst_t* inst,
 
 
 /*
- * Singleton load/status readers: report the PRIMARY leg (primary_leg_index, default SPI1).
+ * Singleton load/status readers: report the PRIMARY leg (primary_leg_index, default logical leg 0).
  * Thin wrappers over the per-instance readers; behaviour is unchanged from before the
  * per-instance API was added. They go through s_stream.legs (the stream is the single
  * source for the leg table, same as is_running()/is_active()) rather than s_spi_legs
@@ -1861,6 +1963,15 @@ bool dspic33ak_spi_i2s_tdm_get_status( dspic33ak_spi_i2s_tdm_status_t* status, b
 // with a compile-time assert: change the RX-DMA channel macro and the build FAILS until the vector
 // name (and its assert) is updated to match. (tx) is passed so tdm_rx_block can pick the writable TX
 // half; the TX channel raises no interrupt.
+#if DSPIC33AK_TDM_BASE_ON_SPI34
+TDM_COMPILEASSERT( DSPIC33AK_TDM_SPI3_RX_DMA == 4 );   /* logical A -> _DMA4Interrupt */
+void __attribute__((interrupt, context)) _DMA4Interrupt(void)
+{
+    tdm_rx_block( &s_spi_legs[TDM_SPI_LEG_SPI1],
+                  DSPIC33AK_TDM_SPI3_RX_DMA, DSPIC33AK_TDM_SPI3_TX_DMA,
+                  TDM_LEG_HALF_WORDS(DSPIC33AK_TDM_SLOTS_PER_FS, DSPIC33AK_TDM_BLOCK_FRAMES) );
+}
+#else
 TDM_COMPILEASSERT( DSPIC33AK_TDM_SPI1_RX_DMA == 0 );   /* _DMA0Interrupt binding */
 void __attribute__((interrupt, context)) _DMA0Interrupt(void)
 {
@@ -1868,7 +1979,17 @@ void __attribute__((interrupt, context)) _DMA0Interrupt(void)
                   DSPIC33AK_TDM_SPI1_RX_DMA, DSPIC33AK_TDM_SPI1_TX_DMA,
                   TDM_LEG_HALF_WORDS(DSPIC33AK_TDM_SLOTS_PER_FS, DSPIC33AK_TDM_BLOCK_FRAMES) );
 }
+#endif
 #if DSPIC33AK_TDM_USE_SPI2
+#if DSPIC33AK_TDM_BASE_ON_SPI34
+TDM_COMPILEASSERT( DSPIC33AK_TDM_SPI4_RX_DMA == 6 );   /* logical B -> _DMA6Interrupt */
+void __attribute__((interrupt, context)) _DMA6Interrupt(void)
+{
+    tdm_rx_block( &s_spi_legs[TDM_SPI_LEG_SPI2],
+                  DSPIC33AK_TDM_SPI4_RX_DMA, DSPIC33AK_TDM_SPI4_TX_DMA,
+                  TDM_LEG_HALF_WORDS(DSPIC33AK_TDM_SLOTS_PER_FS, DSPIC33AK_TDM_BLOCK_FRAMES) );
+}
+#else
 TDM_COMPILEASSERT( DSPIC33AK_TDM_SPI2_RX_DMA == 2 );   /* _DMA2Interrupt binding */
 void __attribute__((interrupt, context)) _DMA2Interrupt(void)
 {
@@ -1876,7 +1997,26 @@ void __attribute__((interrupt, context)) _DMA2Interrupt(void)
                   DSPIC33AK_TDM_SPI2_RX_DMA, DSPIC33AK_TDM_SPI2_TX_DMA,
                   TDM_LEG_HALF_WORDS(DSPIC33AK_TDM_SLOTS_PER_FS, DSPIC33AK_TDM_BLOCK_FRAMES) );
 }
+#endif
 #endif // DSPIC33AK_TDM_USE_SPI2
+#if DSPIC33AK_TDM_USE_SPI3 && !DSPIC33AK_TDM_BASE_ON_SPI34
+TDM_COMPILEASSERT( DSPIC33AK_TDM_SPI3_RX_DMA == 4 );   /* _DMA4Interrupt binding */
+void __attribute__((interrupt, context)) _DMA4Interrupt(void)
+{
+    tdm_rx_block( &s_spi_legs[TDM_SPI_LEG_SPI3],
+                  DSPIC33AK_TDM_SPI3_RX_DMA, DSPIC33AK_TDM_SPI3_TX_DMA,
+                  TDM_LEG_HALF_WORDS(DSPIC33AK_TDM_SLOTS_PER_FS, DSPIC33AK_TDM_BLOCK_FRAMES) );
+}
+#endif // DSPIC33AK_TDM_USE_SPI3
+#if DSPIC33AK_TDM_USE_SPI4 && !DSPIC33AK_TDM_BASE_ON_SPI34
+TDM_COMPILEASSERT( DSPIC33AK_TDM_SPI4_RX_DMA == 6 );   /* _DMA6Interrupt binding */
+void __attribute__((interrupt, context)) _DMA6Interrupt(void)
+{
+    tdm_rx_block( &s_spi_legs[TDM_SPI_LEG_SPI4],
+                  DSPIC33AK_TDM_SPI4_RX_DMA, DSPIC33AK_TDM_SPI4_TX_DMA,
+                  TDM_LEG_HALF_WORDS(DSPIC33AK_TDM_SLOTS_PER_FS, DSPIC33AK_TDM_BLOCK_FRAMES) );
+}
+#endif // DSPIC33AK_TDM_USE_SPI4
 #endif // DSPIC33AK_TDM_DEFINE_DMA_VECTORS
 
 /*
@@ -2340,6 +2480,11 @@ static inline void tdm_rx_block( tdm_spi_leg_t* inst, uint8_t rx_ch, uint8_t tx_
         dspic33ak_spi_i2s_tdm_hw_sample_ack_errflags( inst->spi_inst ) );
 
     dma_stat = dspic33ak_dma_isr_snapshot( rx_ch );
+
+    // Preserve DMAxSTAT before HALF/DONE resolution. In particular, an OVERRUN-only
+    // snapshot has no completed half and will return below; its root-cause evidence must
+    // survive that early exit in the public diagnostics.
+    dspic33ak_spi_i2s_tdm_diag_note_dma_status( &inst->diag, dma_stat );
 
     // Stream-health check; diagnostic print is debug-only. Each instance counts its
     // own deadline misses in its own diag (no shared/master counter).

@@ -73,12 +73,12 @@ needs.
 ## 4. Required sibling HALs
 
 - `dspic33ak_dma` — DMA channel setup/arming (required). Standalone repo:
-  [dspic33ak-dma-hal](https://github.com/sulaolab/dspic33ak-dma-hal).
+  [dspic33ak-hal-dma](https://github.com/sulaolab/dspic33ak-hal-dma).
 - `dspic33ak_high_res_timer` — compile/link sibling dependency for the load monitor.
   Runtime use is gated by `dspic33ak_high_res_timer_is_initialized()`; if the timer is
   not initialized, `get_load()` / `inst_get_load()` returns `false` and zeroes the supplied
   load struct. Standalone repo:
-  [dspic33ak-timer-hal](https://github.com/sulaolab/dspic33ak-timer-hal) (the
+  [dspic33ak-hal-timer](https://github.com/sulaolab/dspic33ak-hal-timer) (the
   Timer2 high-resolution counter).
 - The SPI register-mask helper (`dspic33ak_spi_i2s_tdm_reg.h`) ships inside this HAL folder.
 
@@ -190,7 +190,7 @@ This folder README covers **integration essentials** only. The complete public-A
 lives in the root README of the standalone repo and is the single canonical reference (including
 when you vendor just this folder into another project):
 
-<https://github.com/sulaolab/dspic33ak-spi-i2s-tdm-hal>
+<https://github.com/sulaolab/dspic33ak-hal-spi-i2s-tdm>
 
 It documents, in full:
 

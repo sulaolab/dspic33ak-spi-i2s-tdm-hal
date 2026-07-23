@@ -23,7 +23,7 @@
 //===========================================================
 // dspic33ak_spi_i2s_tdm.{c,h} (+ _hw.{c,h}, _diag.{c,h}, _fs_clc.{c,h}, _reg.h) = the reusable
 // SPI/I2S/TDM transport HAL core. The same source is published standalone as
-// dspic33ak-spi-i2s-tdm-hal and vendored into dspic33ak-hal-starter and the CMSIS-SAI driver.
+// dspic33ak-hal-spi-i2s-tdm and vendored into dspic33ak-hal-starter and the CMSIS-SAI driver.
 // It does: SPI framed-mode (I2S/TDM) setup, DMA + ping-pong buffers, block callback,
 // start/stop/configure/get_status, and deadline-miss + load diagnostics. It is RATE-AGNOSTIC
 // (no sample-rate state/API -- runs at the configured BRG / external clock). It does NOT do DSP,
